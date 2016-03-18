@@ -89,8 +89,10 @@ func (a *Admin) SetServer(addr string) error {
 	return a.writeConfig()
 }
 
-func (a *Admin) AddMySQL(name, dsn string) error {
-	// Add host to Prom and it will start scraping from this client.
+func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error {
+	var bytes []byte
+
+	// Add new host to Prom and it will start scraping from this client.
 	host := pp.Host{
 		Address: a.config.ClientAddress,
 		Alias:   name,
@@ -102,14 +104,36 @@ func (a *Admin) AddMySQL(name, dsn string) error {
 		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
 	}
 
-	// Add instance to QAN.
+	// Get OS instance of local agent which is this system. We link new MySQL
+	// instance to this OS instance so QAN app knows which agent is handling
+	// QAN for this MySQL instance.
+	url = a.api.URL("localhost:"+AGENT_API_PORT, "instances")
+	resp, bytes, err = a.api.Get(url)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	instances := map[string][]proto.Instance{}
+	if err := json.Unmarshal(bytes, &instances); err != nil {
+		return err
+	}
+	if len(instances["os"]) != 1 {
+		return fmt.Errorf("agent reported more than 1 OS instance: %+v", instances)
+	}
+
+	// Add new MySQL instance to QAN.
 	u4, _ := uuid.NewV4()
 	uuid := strings.Replace(u4.String(), "-", "", -1)
 	in := proto.Instance{
-		Subsystem: "mysql",
-		UUID:      uuid,
-		Name:      name,
-		DSN:       dsn,
+		Subsystem:  "mysql",
+		ParentUUID: instances["os"][0].UUID,
+		UUID:       uuid,
+		Name:       name,
+		DSN:        dsn,
+		Distro:     info["distro"],
+		Version:    info["version"],
 	}
 	inBytes, _ := json.Marshal(in)
 	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "/instances")
@@ -122,7 +146,6 @@ func (a *Admin) AddMySQL(name, dsn string) error {
 	}
 
 	// The URI of the new instance is reported in the Location header; fetch it.
-	var bytes []byte
 	//url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, resp.Header.Get("Location"))
 	url = resp.Header.Get("Location")
 	resp, bytes, err = a.api.Get(url)
@@ -153,7 +176,8 @@ func (a *Admin) AddMySQL(name, dsn string) error {
 	// Create a QAN config with no explicitly set vars and agent will use
 	// built-in defaults. Then wrap the config in a StartTool cmd.
 	qanConfig := pc.QAN{
-		UUID: in.UUID,
+		UUID:        in.UUID,
+		CollectFrom: source,
 	}
 	qanConfigBytes, _ := json.Marshal(qanConfig)
 	cmd := proto.Cmd{

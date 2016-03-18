@@ -219,7 +219,7 @@ func main() {
 				name += ":" + info["port"]
 			}
 
-			if err := admin.AddMySQL(name, agentDSN.String()); err != nil {
+			if err := admin.AddMySQL(name, agentDSN.String(), flagQuerySource, info); err != nil {
 				fmt.Printf("Error adding MySQL: %s\n", err)
 				os.Exit(1)
 			}
