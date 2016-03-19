@@ -210,7 +210,7 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 	return nil
 }
 
-func (a *Admin) Status() (map[string][]InstanceStatus, error) {
+func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	status := map[string][]InstanceStatus{
 		"os":    []InstanceStatus{},
 		"mysql": []InstanceStatus{},

@@ -157,7 +157,7 @@ func main() {
 	case "help":
 		if len(args) == 1 {
 			fmt.Println("Usage: pmm-admin [options] <command> [command args]\n\n" +
-				"Commands: add, client, remove, server, status\n\n" +
+				"Commands: add, client, list, remove, server\n\n" +
 				"  <> = required\n" +
 				"  [] = optional\n" +
 				"  [options] (-user, -password, etc.) must precede the <command>\n\n" +
@@ -178,8 +178,8 @@ func main() {
 					"When adding a MySQL instance, specify -agent-user and -agent-password" +
 					" to use an existing MySQL user. Else, the agent MySQL user will be created" +
 					" automatically.\n")
-			case "status":
-				fmt.Printf("Usage: pmm-admin status\n\nLists status of OS and local MySQL instances being monitored.\n")
+			case "list":
+				fmt.Printf("Usage: pmm-admin list\n\nList OS and local MySQL instances being monitored.\n")
 			case "client":
 				fmt.Printf("Usage: pmm-admin client [address]\n\nPrints address of this server, or sets it if [address] given.\n")
 			case "server":
@@ -193,16 +193,16 @@ func main() {
 		fmt.Println(admin.Client())
 	case "server":
 		fmt.Println(admin.Server())
-	case "status":
-		status, err := admin.Status()
+	case "list", "ls":
+		list, err := admin.List()
 		if err != nil {
-			fmt.Printf("Error getting status: %s\n", err)
+			fmt.Printf("Error getting list: %s\n", err)
 			os.Exit(1)
 		}
 		linefmt := "%7s %7s %7s %32s %s\n"
 		fmt.Printf(linefmt, "TYPE", "METRICS", "QUERIES", "UUID", "NAME")
 		fmt.Printf(linefmt, "-------", "-------", "-------", "--------------------------------", "----")
-		for instanceType, instances := range status {
+		for instanceType, instances := range list {
 			for _, in := range instances {
 				fmt.Printf(linefmt, instanceType, in.Metrics, in.Queries, in.UUID, in.Name)
 			}
