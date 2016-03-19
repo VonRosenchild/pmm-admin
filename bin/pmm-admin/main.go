@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/percona/go-mysql/dsn"
 	pmm "github.com/percona/pmm-admin"
@@ -108,8 +109,7 @@ func main() {
 
 	args := fs.Args()
 	if len(args) == 0 {
-		fs.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <cmd>\n", os.Args[0])
+		fmt.Println("No command specified. Run 'pmm-admin help'.")
 		os.Exit(1)
 	}
 
@@ -145,7 +145,7 @@ func main() {
 		os.Exit(1)
 	}
 	if admin.Server() == "" {
-		fmt.Printf("%s exists but the server address has not been set. Run 'pmm-admin server <address>'.\n", flagConfig)
+		fmt.Printf("%s exists but the server address has not been set. Run 'pmm-admin server <address[:port]>'.\n", flagConfig)
 		os.Exit(1)
 	}
 
@@ -154,14 +154,67 @@ func main() {
 
 	// Execute the command.
 	switch cmd {
+	case "help":
+		if len(args) == 1 {
+			fmt.Println("Usage: pmm-admin [options] <command> [command args]\n\n" +
+				"Commands: add, client, remove, server, status\n\n" +
+				"  <> = required\n" +
+				"  [] = optional\n" +
+				"  [options] (-user, -password, etc.) must precede the <command>\n\n" +
+				"Example:\n" +
+				"  pmm-admin -agent-user percona -password percona add mysql\n\n" +
+				"Run 'pmm-admin help options' to list [options]\n" +
+				"Run 'pmm-admin help <command>' for command-specific help\n")
+		} else {
+			cmd := args[1]
+			switch cmd {
+			case "options":
+				fs.PrintDefaults()
+			case "add":
+				fmt.Printf("Usage: pmm-admin [options] add <instance type>\n\n" +
+					"Instance types:\n" +
+					"  os     Add local OS instance and start monitoring\n" +
+					"  mysql  Add local MySQL instance and start monitoring\n\n" +
+					"When adding a MySQL instance, specify -agent-user and -agent-password" +
+					" to use an existing MySQL user. Else, the agent MySQL user will be created" +
+					" automatically.\n")
+			case "status":
+				fmt.Printf("Usage: pmm-admin status\n\nLists status of OS and local MySQL instances being monitored.\n")
+			case "client":
+				fmt.Printf("Usage: pmm-admin client [address]\n\nPrints address of this server, or sets it if [address] given.\n")
+			case "server":
+				fmt.Printf("Usage: pmm-admin server [address[:port]]\n\nPrints address of PMM server, or sets it if [address] given.\n")
+			default:
+				fmt.Printf("Unknown comand: %s\n", cmd)
+			}
+		}
+		os.Exit(0)
 	case "client":
 		fmt.Println(admin.Client())
 	case "server":
 		fmt.Println(admin.Server())
+	case "status":
+		status, err := admin.Status()
+		if err != nil {
+			fmt.Printf("Error getting status: %s\n", err)
+			os.Exit(1)
+		}
+		linefmt := "%7s %7s %7s %32s %s\n"
+		fmt.Printf(linefmt, "TYPE", "METRICS", "QUERIES", "UUID", "NAME")
+		fmt.Printf(linefmt, "-------", "-------", "-------", "--------------------------------", "----")
+		for instanceType, instances := range status {
+			for _, in := range instances {
+				fmt.Printf(linefmt, instanceType, in.Metrics, in.Queries, in.UUID, in.Name)
+			}
+		}
 	case "add":
+		if len(args[1:]) != 1 {
+			fmt.Printf("Too many command args: '%s', expected 'add <instance type>'\n", strings.Join(args, " "))
+			os.Exit(1)
+		}
 		instanceType := args[1]
 		switch instanceType {
-		case "system":
+		case "os":
 		case "mysql":
 			userDSN := dsn.DSN{
 				DefaultsFile: flagMySQLDefaultsFile,
@@ -225,7 +278,10 @@ func main() {
 			}
 
 			fmt.Printf("OK, now monitoring MySQL %s using DSN %s\n", name, dsn.HidePassword(agentDSN.String()))
+		default:
+			fmt.Printf("Invalid instance type: %s\n", instanceType)
 		}
+	case "rm", "remove":
 	default:
 		fmt.Printf("Unknown command: '%s'\n", args[0])
 		os.Exit(1)

@@ -37,6 +37,14 @@ type Config struct {
 	ServerAddress string
 }
 
+type InstanceStatus struct {
+	UUID    string
+	Type    string
+	Name    string // Alias in Prom
+	Metrics string // if scraped by Prom
+	Queries string // if local agent running QAN
+}
+
 type Admin struct {
 	filename string
 	config   *Config
@@ -200,6 +208,123 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 	}
 
 	return nil
+}
+
+func (a *Admin) Status() (map[string][]InstanceStatus, error) {
+	status := map[string][]InstanceStatus{
+		"os":    []InstanceStatus{},
+		"mysql": []InstanceStatus{},
+	}
+
+	// Returns {"mysql":[{"Alias":"beatrice.local","Address":"127.0.0.2"}]}
+	var hosts map[string][]pp.Host
+	url := a.api.URL("localhost:"+PROM_API_PORT, "hosts")
+	resp, bytes, err := a.api.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	if err := json.Unmarshal(bytes, &hosts); err != nil {
+		return nil, err
+	}
+
+	// Get local agent configs which contains any QAN configs it's running.
+	var configs []proto.AgentConfig
+	url = a.api.URL("localhost:"+AGENT_API_PORT, "configs")
+	resp, bytes, err = a.api.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	if err := json.Unmarshal(bytes, &configs); err != nil {
+		return nil, err
+	}
+
+	// Get local agent instance to verify that Prom MySQL host = agent QAN host.
+	var instances map[string][]proto.Instance
+	url = a.api.URL("localhost:"+AGENT_API_PORT, "instances")
+	resp, bytes, err = a.api.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	if err := json.Unmarshal(bytes, &instances); err != nil {
+		return nil, err
+	}
+
+	// First, let's get the local OS instance because there should only be one.
+	// In Prom, it's the one with the current client address.
+	var osHost *pp.Host
+	for _, host := range hosts["os"] {
+		if host.Address != a.config.ClientAddress {
+			continue
+		}
+		osHost = &host
+		break
+	}
+	if osHost != nil {
+		ins := InstanceStatus{
+			Type:    "os",
+			Name:    osHost.Alias,
+			Metrics: "yes",
+		}
+		status["os"] = append(status["os"], ins)
+	}
+
+	// For now we only support 1 MySQL host per instance, i.e. Prom should only
+	// be scaping 1 MySQL host from this client.
+	var mysqlHost *pp.Host
+	for _, host := range hosts["mysql"] {
+		if host.Address != a.config.ClientAddress {
+			continue
+		}
+		mysqlHost = &host
+		break
+	}
+
+	// Check if the loacl agent is running QAN for the same MySQL host;
+	// it should be.
+	for _, config := range configs {
+		if config.Service != "qan" {
+			continue
+		}
+		for _, in := range instances["mysql"] {
+			if in.UUID != config.UUID {
+				continue
+			}
+			// Now we have the QAN config and instance.
+			ins := InstanceStatus{
+				Type:    "mysql",
+				UUID:    in.UUID,
+				Name:    in.Name,
+				Metrics: "no",
+				Queries: "yes",
+			}
+			if mysqlHost != nil && mysqlHost.Alias == in.Name {
+				ins.Metrics = "yes"
+				mysqlHost = nil
+			}
+			status["mysql"] = append(status["mysql"], ins)
+		}
+	}
+
+	if mysqlHost != nil {
+		ins := InstanceStatus{
+			Type:    "mysql",
+			Name:    osHost.Alias,
+			Metrics: "yes",
+			Queries: "no",
+		}
+		status["mysql"] = append(status["mysql"], ins)
+	}
+
+	return status, nil
 }
 
 // --------------------------------------------------------------------------
