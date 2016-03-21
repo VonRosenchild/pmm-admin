@@ -178,6 +178,12 @@ func main() {
 					"When adding a MySQL instance, specify -agent-user and -agent-password" +
 					" to use an existing MySQL user. Else, the agent MySQL user will be created" +
 					" automatically.\n")
+			case "remove":
+				fmt.Printf("Usage: pmm-admin [options] remove <instance type> <name>\n\n" +
+					"Instance types:\n" +
+					"  os     Stop monitoring local OS instance\n" +
+					"  mysql  Stop monitoring local MySQL instance\n\n" +
+					"Run 'pmm-admin list' to see the name of instances being monitored.\n")
 			case "list":
 				fmt.Printf("Usage: pmm-admin list\n\nList OS and local MySQL instances being monitored.\n")
 			case "client":
@@ -281,7 +287,22 @@ func main() {
 		default:
 			fmt.Printf("Invalid instance type: %s\n", instanceType)
 		}
-	case "rm", "remove":
+	case "remove", "rm":
+		if len(args[1:]) != 2 {
+			fmt.Printf("Too many command args: '%s', expected 'remove <instance type> <name>'\n", strings.Join(args, " "))
+			os.Exit(1)
+		}
+		instanceType := args[1]
+		name := args[2]
+		switch instanceType {
+		case "os":
+		case "mysql":
+			if err := admin.RemoveMySQL(name); err != nil {
+				fmt.Printf("Error remove MySQL %s: %s\n", name, err)
+				os.Exit(1)
+			}
+			fmt.Printf("OK, stopped monitoring MySQL %s\n", name)
+		}
 	default:
 		fmt.Printf("Unknown command: '%s'\n", args[0])
 		os.Exit(1)

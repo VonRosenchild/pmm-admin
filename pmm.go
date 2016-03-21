@@ -27,7 +27,6 @@ import (
 
 	"github.com/nu7hatch/gouuid"
 	"github.com/percona/platform/proto"
-	pc "github.com/percona/platform/proto/config"
 	pp "github.com/percona/prom-config-api/prom"
 	"gopkg.in/yaml.v2"
 )
@@ -115,16 +114,8 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 	// Get OS instance of local agent which is this system. We link new MySQL
 	// instance to this OS instance so QAN app knows which agent is handling
 	// QAN for this MySQL instance.
-	url = a.api.URL("localhost:"+AGENT_API_PORT, "instances")
-	resp, bytes, err = a.api.Get(url)
+	instances, err := a.localAgentInstances()
 	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
-	}
-	instances := map[string][]proto.Instance{}
-	if err := json.Unmarshal(bytes, &instances); err != nil {
 		return err
 	}
 	if len(instances["os"]) != 1 {
@@ -171,21 +162,16 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 	// a QAN config to start that tool. First, we'll need to get the local agent
 	// ID to indicate to the QAN API (via the Put() url below) to start QAN on
 	// this local agent.
-	url = a.api.URL("localhost:"+AGENT_API_PORT, "id")
-	resp, bytes, err = a.api.Get(url)
+	agentId, err := a.localAgentId()
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
-	}
-	agentId := string(bytes)
 
 	// Create a QAN config with no explicitly set vars and agent will use
 	// built-in defaults. Then wrap the config in a StartTool cmd.
-	qanConfig := pc.QAN{
-		UUID:        in.UUID,
-		CollectFrom: source,
+	qanConfig := map[string]string{
+		"UUID":        in.UUID,
+		"CollectFrom": source,
 	}
 	qanConfigBytes, _ := json.Marshal(qanConfig)
 	cmd := proto.Cmd{
@@ -198,6 +184,62 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 
 	// Send the StartTool cmd to the API which relays it to the agent, then
 	// relays the agent's reply back to here.
+	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "agents", agentId, "cmd")
+	resp, _, err = a.api.Put(url, cmdBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+
+	return nil
+}
+
+func (a *Admin) RemoveMySQL(name string) error {
+	// Remove the host from Prom.
+	url := a.api.URL(a.config.ServerAddress+":"+PROM_API_PORT, "hosts", "mysql", name)
+	resp, _, err := a.api.Delete(url)
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		// warn?
+	default:
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+
+	// Get local agent's instances to look up UUID of MySQL instance by name.
+	instances, err := a.localAgentInstances()
+	if err != nil {
+		return err
+	}
+	var mysqlInstance *proto.Instance
+	for _, in := range instances["mysql"] {
+		if in.Name != name {
+			continue
+		}
+		mysqlInstance = &in // found it
+		break
+	}
+	if mysqlInstance == nil {
+		return nil // not found, warn?
+	}
+
+	// Send the StopTool cmd to the API which relays it to the agent, then
+	// relays the agent's reply back to here.
+	agentId, err := a.localAgentId()
+	if err != nil {
+		return err
+	}
+
+	cmd := proto.Cmd{
+		User:    "pmm-admin@" + a.api.Hostname(),
+		Service: "qan",
+		Cmd:     "StopTool",
+		Data:    []byte(mysqlInstance.UUID),
+	}
+	cmdBytes, _ := json.Marshal(cmd)
+
 	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "agents", agentId, "cmd")
 	resp, _, err = a.api.Put(url, cmdBytes)
 	if err != nil {
@@ -343,4 +385,32 @@ func fileExists(file string) bool {
 		return false
 	}
 	return true
+}
+
+func (a *Admin) localAgentId() (string, error) {
+	url := a.api.URL("localhost:"+AGENT_API_PORT, "id")
+	resp, bytes, err := a.api.Get(url)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	return string(bytes), nil
+}
+
+func (a *Admin) localAgentInstances() (map[string][]proto.Instance, error) {
+	url := a.api.URL("localhost:"+AGENT_API_PORT, "instances")
+	resp, bytes, err := a.api.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	instances := map[string][]proto.Instance{}
+	if err := json.Unmarshal(bytes, &instances); err != nil {
+		return nil, err
+	}
+	return instances, nil
 }

@@ -143,6 +143,10 @@ func (a *API) Put(url string, data []byte) (*http.Response, []byte, error) {
 	return a.send("PUT", url, data)
 }
 
+func (a *API) Delete(url string) (*http.Response, []byte, error) {
+	return a.send("DELETE", url, nil)
+}
+
 // --------------------------------------------------------------------------
 
 func newClient() *http.Client {
@@ -150,7 +154,13 @@ func newClient() *http.Client {
 }
 
 func (a *API) send(method, url string, data []byte) (*http.Response, []byte, error) {
-	req, err := http.NewRequest(method, url, bytes.NewReader(data))
+	var req *http.Request
+	var err error
+	if data != nil {
+		req, err = http.NewRequest(method, url, bytes.NewReader(data))
+	} else {
+		req, err = http.NewRequest(method, url, nil)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
