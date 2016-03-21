@@ -108,20 +108,40 @@ func main() {
 	}
 
 	args := fs.Args()
+
+	// Always show help.
+	if len(args) > 0 && args[0] == "help" {
+		help(args)
+		os.Exit(0)
+	}
+
+	// If config file doesn't exist, tell user how to get started.
+	if !pmm.FileExists(flagConfig) {
+		fmt.Printf("%s does not exist. To get started, first run"+
+			" 'pmm-admin server <address[:port]>' and 'pmm-admin client <address>'"+
+			" to set the address of the PMM server and this server, respectively."+
+			" Run 'pmm-admin help' for more information.\n",
+			flagConfig)
+		os.Exit(1)
+	}
+
+	// A command is required.
 	if len(args) == 0 {
 		fmt.Println("No command specified. Run 'pmm-admin help'.")
 		os.Exit(1)
 	}
 
-	// Handle special command: client|server <addr>. This initializes the config
-	// file and sets the client|server address, required for all other commands.
+	// We have a command. Let's try to execute it. Create a pmm.Admin which
+	// does most of the real work.
+	cmd := args[0]
 	admin := pmm.NewAdmin()
 	if err := admin.LoadConfig(flagConfig); err != nil {
 		fmt.Printf("Error reading %s: %s\n", flagConfig, err)
 		os.Exit(1)
 	}
 
-	cmd := args[0]
+	// Handle special command: client|server <addr>. This initializes the config
+	// file and sets the client|server address, required for all other commands.
 	if (cmd == "server" || cmd == "client") && len(args) == 2 {
 		addr := args[1]
 		var err error
@@ -149,52 +169,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Execute the command. Create an API because most commands are just
+	// wrappers around various API calls.
 	api := pmm.NewAPI(nil)
 	admin.SetAPI(api)
 
-	// Execute the command.
 	switch cmd {
-	case "help":
-		if len(args) == 1 {
-			fmt.Println("Usage: pmm-admin [options] <command> [command args]\n\n" +
-				"Commands: add, client, list, remove, server\n\n" +
-				"  <> = required\n" +
-				"  [] = optional\n" +
-				"  [options] (-user, -password, etc.) must precede the <command>\n\n" +
-				"Example:\n" +
-				"  pmm-admin -agent-user percona -password percona add mysql\n\n" +
-				"Run 'pmm-admin help options' to list [options]\n" +
-				"Run 'pmm-admin help <command>' for command-specific help\n")
-		} else {
-			cmd := args[1]
-			switch cmd {
-			case "options":
-				fs.PrintDefaults()
-			case "add":
-				fmt.Printf("Usage: pmm-admin [options] add <instance type>\n\n" +
-					"Instance types:\n" +
-					"  os     Add local OS instance and start monitoring\n" +
-					"  mysql  Add local MySQL instance and start monitoring\n\n" +
-					"When adding a MySQL instance, specify -agent-user and -agent-password" +
-					" to use an existing MySQL user. Else, the agent MySQL user will be created" +
-					" automatically.\n")
-			case "remove":
-				fmt.Printf("Usage: pmm-admin [options] remove <instance type> <name>\n\n" +
-					"Instance types:\n" +
-					"  os     Stop monitoring local OS instance\n" +
-					"  mysql  Stop monitoring local MySQL instance\n\n" +
-					"Run 'pmm-admin list' to see the name of instances being monitored.\n")
-			case "list":
-				fmt.Printf("Usage: pmm-admin list\n\nList OS and local MySQL instances being monitored.\n")
-			case "client":
-				fmt.Printf("Usage: pmm-admin client [address]\n\nPrints address of this server, or sets it if [address] given.\n")
-			case "server":
-				fmt.Printf("Usage: pmm-admin server [address[:port]]\n\nPrints address of PMM server, or sets it if [address] given.\n")
-			default:
-				fmt.Printf("Unknown comand: %s\n", cmd)
-			}
-		}
-		os.Exit(0)
 	case "client":
 		fmt.Println(admin.Client())
 	case "server":
@@ -309,4 +289,51 @@ func main() {
 	}
 
 	os.Exit(0)
+}
+
+func help(args []string) {
+	if len(args) == 1 {
+		fmt.Println("Usage: pmm-admin [options] <command> [command args]\n\n" +
+			"Commands: add, client, list, remove, server\n\n" +
+			"  <> = required\n" +
+			"  [] = optional\n" +
+			"  [options] (-user, -password, etc.) must precede the <command>\n\n" +
+			"Example:\n" +
+			"  pmm-admin -agent-user percona -password percona add mysql\n\n" +
+			"The -config file must exist and be initialized by running the" +
+			" 'server' and 'client' commands.\n\n" +
+			"Run 'pmm-admin help options' to list [options]\n" +
+			"Run 'pmm-admin help <command>' for command-specific help\n")
+	} else {
+		cmd := args[1]
+		switch cmd {
+		case "options":
+			fs.PrintDefaults()
+		case "add":
+			fmt.Printf("Usage: pmm-admin [options] add <instance type>\n\n" +
+				"Instance types:\n" +
+				"  os     Add local OS instance and start monitoring\n" +
+				"  mysql  Add local MySQL instance and start monitoring\n\n" +
+				"When adding a MySQL instance, specify -agent-user and -agent-password" +
+				" to use an existing MySQL user. Else, the agent MySQL user will be created" +
+				" automatically.\n")
+		case "remove":
+			fmt.Printf("Usage: pmm-admin [options] remove <instance type> <name>\n\n" +
+				"Instance types:\n" +
+				"  os     Stop monitoring local OS instance\n" +
+				"  mysql  Stop monitoring local MySQL instance\n\n" +
+				"Run 'pmm-admin list' to see the name of instances being monitored.\n")
+		case "list":
+			fmt.Printf("Usage: pmm-admin list\n\nList OS and local MySQL instances being monitored.\n")
+		case "client":
+			fmt.Printf("Usage: pmm-admin client [address]\n\n" +
+				"Prints the address of this server (the client), or sets it if [address] given." +
+				" [address] must be accessible from the PMM server (PMM server -> client).\n")
+		case "server":
+			fmt.Printf("Usage: pmm-admin server [address[:port]]\n\n" +
+				"Prints the address of the PMM server, or sets it if [address] given.\n")
+		default:
+			fmt.Printf("Unknown comand: %s\n", cmd)
+		}
+	}
 }

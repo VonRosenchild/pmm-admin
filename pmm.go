@@ -56,7 +56,7 @@ func NewAdmin() *Admin {
 }
 
 func (a *Admin) LoadConfig(filename string) error {
-	if !fileExists(filename) {
+	if !FileExists(filename) {
 		a.filename = filename
 		a.config = &Config{}
 		return nil
@@ -376,7 +376,7 @@ func (a *Admin) writeConfig() error {
 	return ioutil.WriteFile(a.filename, bytes, 0644)
 }
 
-func fileExists(file string) bool {
+func FileExists(file string) bool {
 	_, err := os.Stat(file)
 	if err == nil {
 		return true
