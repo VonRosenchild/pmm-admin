@@ -31,6 +31,8 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+var VERSION string = "1.0.0"
+
 type Config struct {
 	ClientAddress string
 	ServerAddress string

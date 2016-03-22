@@ -1,3 +1,4 @@
 *.swp
 *.tmp
+distro/
 bin/pmm-admin/pmm-admin

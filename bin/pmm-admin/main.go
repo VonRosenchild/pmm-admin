@@ -47,6 +47,7 @@ var (
 	flagMySQLMaxUserConn  int64
 	flagAgentUser         string
 	flagAgentPass         string
+	flagVersion           bool
 )
 
 var fs *flag.FlagSet
@@ -70,6 +71,8 @@ func init() {
 	fs.StringVar(&flagQuerySource, "query-source", "auto", "Where to collect queries: slowlog, perfschema, auto")
 	fs.Int64Var(&flagMySQLMaxUserConn, "max-user-connections", 5, "Max number of MySQL connections")
 	fs.BoolVar(&flagMySQLOldPasswords, "old-passwords", false, "Old passwords")
+
+	fs.BoolVar(&flagVersion, "version", false, "Print version")
 }
 
 var portSuffix *regexp.Regexp = regexp.MustCompile(`:\d+$`)
@@ -109,9 +112,13 @@ func main() {
 
 	args := fs.Args()
 
-	// Always show help.
+	// Always show help and version.
 	if len(args) > 0 && args[0] == "help" {
 		help(args)
+		os.Exit(0)
+	}
+	if flagVersion {
+		fmt.Printf("pmm-admin %s\n", pmm.VERSION)
 		os.Exit(0)
 	}
 
