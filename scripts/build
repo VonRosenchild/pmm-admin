@@ -111,10 +111,12 @@ fi
 # Install/update deps (vendoring)
 if [ "$DEPS" = "yes" ]; then
    VENDOR_DIR="$ROOT_DIR/vendor"
-   export GOPATH="$VENDOR_DIR:$GOPATH"
    [ ! -d "$VENDOR_DIR" ] && mkdir "$VENDOR_DIR"
+   export GOPATH="$VENDOR_DIR:$GOPATH"
    echo "Cloning deps into $VENDOR_DIR..."
-   godep restore
+   set +e
+   GOPATH="$VENDOR_DIR" godep restore
+   set -e
 fi
 
 # Build binaries
@@ -123,17 +125,15 @@ echo "Building $BIN..."
    cd $ROOT_DIR/bin/$BIN
    go build -ldflags "-X github.com/percona/pmm-admin/pmm.VERSION=$VER"
    # Check that binary was compiled with pkgs from vendor dir.
-   #if [ "$DEPS" = "yes" ]; then
-   #   strings percona-datastore | grep -q "$VENDOR_DIR/src/github.com/go-sql-driver/mysql" \
-   #      || err "percona-datastore not built with vendor deps ($VENDOR_DIR)"
-   #   strings percona-datastore | grep -q "$VENDOR_DIR/src/github.com/revel/revel" \
-   #      || err "percona-datastore not built with vendor deps ($VENDOR_DIR)"
-   #fi
+   if [ "$DEPS" = "yes" ]; then
+      strings $BIN | grep -q "$VENDOR_DIR/src/github.com/go-sql-driver/mysql" \
+         || err "$BIN not built with vendor deps ($VENDOR_DIR)"
+   fi
 )
 
 # Set up the distro dir
 DISTRO_DIR="$ROOT_DIR/distro"
-[ ! -d "distro" ]    && mkdir distro
+[ ! -d "distro" ] && mkdir distro
 cd distro/
 
 # Build the package
