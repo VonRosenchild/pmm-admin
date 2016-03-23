@@ -31,7 +31,7 @@ import (
 const (
 	DEFAULT_QAN_API_PORT         = "9001"
 	DEFAULT_PROM_CONFIG_API_PORT = "9003"
-	DEFAULT_CONFIG_FILE          = "/usr/local/percona/pmm.yml"
+	DEFAULT_CONFIG_FILE          = "/usr/local/percona/pmm-client/pmm.yml"
 )
 
 var (
