@@ -19,6 +19,7 @@ package pmm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -33,9 +34,15 @@ import (
 
 var VERSION string = "1.0.0"
 
+var (
+	ErrNotFound = errors.New("resource not found")
+	ErrNoOS     = errors.New("OS not set")
+)
+
 type Config struct {
-	ClientAddress string
-	ServerAddress string
+	ClientAddress string `yaml:"client_address"`
+	ClientUUID    string `yaml:"client_uuid"`
+	ServerAddress string `yaml:"server_address"`
 }
 
 type InstanceStatus struct {
@@ -80,17 +87,8 @@ func (a *Admin) SetAPI(api *API) {
 	a.api = api
 }
 
-func (a *Admin) Client() string {
-	return a.config.ClientAddress
-}
-
 func (a *Admin) Server() string {
 	return a.config.ServerAddress
-}
-
-func (a *Admin) SetClient(addr string) error {
-	a.config.ClientAddress = addr
-	return a.writeConfig()
 }
 
 func (a *Admin) SetServer(addr string) error {
@@ -98,10 +96,92 @@ func (a *Admin) SetServer(addr string) error {
 	return a.writeConfig()
 }
 
+func (a *Admin) ClientAddress() string {
+	return a.config.ClientAddress
+}
+
+func (a *Admin) OS() (proto.Instance, error) {
+	var in proto.Instance
+
+	if a.config.ClientUUID == "" {
+		return in, ErrNoOS
+	}
+
+	url := a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "instances", a.config.ClientUUID)
+	resp, bytes, err := a.api.Get(url)
+	if err != nil {
+		return in, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return in, ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return in, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	if err := json.Unmarshal(bytes, &in); err != nil {
+		return in, err
+	}
+
+	return in, nil
+}
+
+func (a *Admin) AddOS(addr string) error {
+	// Agent creates an OS instance on install. Use its name for the Prom
+	// host alias.
+	instances, err := a.localAgentInstances()
+	if err != nil {
+		return err
+	}
+	if len(instances["os"]) != 1 {
+		return fmt.Errorf("agent reported more than 1 OS instance: %+v", instances)
+	}
+	os := instances["os"][0]
+
+	// Add new host to Prom and it will start scraping from this client.
+	host := pp.Host{
+		Address: addr,
+		Alias:   os.Name,
+	}
+	hostBytes, _ := json.Marshal(host)
+	url := a.api.URL(a.config.ServerAddress+":"+PROM_API_PORT, "hosts", "os")
+	resp, _, err := a.api.Post(url, hostBytes)
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+	}
+
+	// Set OS locally.
+	a.config.ClientAddress = addr
+	a.config.ClientUUID = os.UUID
+	return a.writeConfig()
+}
+
+func (a *Admin) RemoveOS(name string) error {
+	// Remove the host from Prom.
+	url := a.api.URL(a.config.ServerAddress+":"+PROM_API_PORT, "hosts", "os", name)
+	resp, _, err := a.api.Delete(url)
+	if err != nil {
+		return err
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		// warn?
+	default:
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+
+	return nil
+}
+
 func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error {
 	var bytes []byte
 
-	// Add new host to Prom and it will start scraping from this client.
+	// User must first add the OS which sets the client address.
+	if a.config.ClientAddress == "" {
+		return ErrNoOS
+	}
+
+	// Add new MySQL host to Prom and it will start scraping from this client.
 	host := pp.Host{
 		Address: a.config.ClientAddress,
 		Alias:   name,
@@ -137,7 +217,7 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 		Version:    info["version"],
 	}
 	inBytes, _ := json.Marshal(in)
-	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "/instances")
+	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "instances")
 	resp, _, err = a.api.Post(url, inBytes)
 	if err != nil {
 		return err
@@ -288,20 +368,6 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 		return nil, err
 	}
 
-	// Get local agent instance to verify that Prom MySQL host = agent QAN host.
-	var instances map[string][]proto.Instance
-	url = a.api.URL("localhost:"+AGENT_API_PORT, "instances")
-	resp, bytes, err = a.api.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
-	}
-	if err := json.Unmarshal(bytes, &instances); err != nil {
-		return nil, err
-	}
-
 	// First, let's get the local OS instance because there should only be one.
 	// In Prom, it's the one with the current client address.
 	var osHost *pp.Host
@@ -330,6 +396,25 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 		}
 		mysqlHost = &host
 		break
+	}
+
+	// Get local agent instance to verify that Prom MySQL host = agent QAN host.
+	var instances map[string][]proto.Instance
+	url = a.api.URL("localhost:"+AGENT_API_PORT, "instances")
+	resp, bytes, err = a.api.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	if err := json.Unmarshal(bytes, &instances); err != nil {
+		return nil, err
+	}
+
+	// If Prom and agent have an OS instance with the same name, set its UUID.
+	if osHost != nil && len(instances["os"]) > 0 && instances["os"][0].Name == osHost.Alias {
+		status["os"][0].UUID = instances["os"][0].UUID
 	}
 
 	// Check if the loacl agent is running QAN for the same MySQL host;
