@@ -110,7 +110,7 @@ func (a *API) Get(url string) (*http.Response, []byte, error) {
 	client := newClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("GET %s: %s", url, err)
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
