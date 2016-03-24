@@ -110,7 +110,7 @@ func (a *API) Get(url string) (*http.Response, []byte, error) {
 	client := newClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("client.Do: %s", url, err)
+		return nil, nil, fmt.Errorf("GET %s: %s", url, err)
 	}
 	defer resp.Body.Close()
 
@@ -119,16 +119,16 @@ func (a *API) Get(url string) (*http.Response, []byte, error) {
 		buf := new(bytes.Buffer)
 		gz, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			return nil, nil, fmt.Errorf("gzip.NewReader: %s", err)
+			return nil, nil, fmt.Errorf("GET %s: gzip.NewReader: %s", url, err)
 		}
 		if _, err := io.Copy(buf, gz); err != nil {
-			return resp, nil, fmt.Errorf("io.Copy: %s", err)
+			return resp, nil, fmt.Errorf("GET %s: io.Copy: %s", url, err)
 		}
 		data = buf.Bytes()
 	} else {
 		data, err = ioutil.ReadAll(resp.Body)
 		if err != nil {
-			return resp, nil, fmt.Errorf("ioutil.ReadAll: %s", err)
+			return resp, nil, fmt.Errorf("GET %s: ioutil.ReadAll: %s", url, err)
 		}
 	}
 
