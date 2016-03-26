@@ -29,9 +29,7 @@ import (
 )
 
 const (
-	DEFAULT_QAN_API_PORT         = "9001"
-	DEFAULT_PROM_CONFIG_API_PORT = "9003"
-	DEFAULT_CONFIG_FILE          = "/usr/local/percona/pmm-client/pmm.yml"
+	DEFAULT_CONFIG_FILE = "/usr/local/percona/pmm-client/pmm.yml"
 )
 
 var (
@@ -48,6 +46,7 @@ var (
 	flagAgentUser         string
 	flagAgentPass         string
 	flagVersion           bool
+	flagStart             bool
 )
 
 var fs *flag.FlagSet
@@ -73,6 +72,7 @@ func init() {
 	fs.BoolVar(&flagMySQLOldPasswords, "old-passwords", false, "Old passwords")
 
 	fs.BoolVar(&flagVersion, "version", false, "Print version")
+	fs.BoolVar(&flagStart, "start", true, "Start monitoring instance after add")
 }
 
 var portSuffix *regexp.Regexp = regexp.MustCompile(`:\d+$`)
@@ -208,7 +208,7 @@ func main() {
 				os.Exit(1)
 			}
 			addr := args[2]
-			if err := admin.AddOS(addr); err != nil {
+			if err := admin.AddOS(addr, flagStart); err != nil {
 				fmt.Printf("Error adding OS: %s\n", err)
 				os.Exit(1)
 			}
@@ -217,7 +217,11 @@ func main() {
 				os.Exit(1)
 			}
 			os, _ := admin.OS()
-			fmt.Printf("OK, now monitoring this OS as %s\n", os.Name)
+			if flagStart {
+				fmt.Printf("OK, now monitoring this OS as %s\n", os.Name)
+			} else {
+				fmt.Printf("OK, added this OS as %s\n", os.Name)
+			}
 		case "mysql":
 			if admin.ClientAddress() == "" {
 				fmt.Printf("Add OS first to set client address by running 'pmm-admin add os <address>'\n")
@@ -279,12 +283,15 @@ func main() {
 				name += ":" + info["port"]
 			}
 
-			if err := admin.AddMySQL(name, agentDSN.String(), flagQuerySource, info); err != nil {
+			if err := admin.AddMySQL(name, agentDSN.String(), flagQuerySource, flagStart, info); err != nil {
 				fmt.Printf("Error adding MySQL: %s\n", err)
 				os.Exit(1)
 			}
-
-			fmt.Printf("OK, now monitoring MySQL %s using DSN %s\n", name, dsn.HidePassword(agentDSN.String()))
+			if flagStart {
+				fmt.Printf("OK, now monitoring MySQL %s using DSN %s\n", name, dsn.HidePassword(agentDSN.String()))
+			} else {
+				fmt.Printf("OK, added MySQL %s using DSN %s\n", name, dsn.HidePassword(agentDSN.String()))
+			}
 		default:
 			fmt.Printf("Invalid instance type: %s\n", instanceType)
 		}

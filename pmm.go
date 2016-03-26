@@ -28,7 +28,6 @@ import (
 
 	"github.com/nu7hatch/gouuid"
 	"github.com/percona/platform/proto"
-	pp "github.com/percona/prom-config-api/prom"
 	"gopkg.in/yaml.v2"
 )
 
@@ -107,7 +106,7 @@ func (a *Admin) OS() (proto.Instance, error) {
 		return in, ErrNoOS
 	}
 
-	url := a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "instances", a.config.ClientUUID)
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "instances", a.config.ClientUUID)
 	resp, bytes, err := a.api.Get(url)
 	if err != nil {
 		return in, err
@@ -125,7 +124,7 @@ func (a *Admin) OS() (proto.Instance, error) {
 	return in, nil
 }
 
-func (a *Admin) AddOS(addr string) error {
+func (a *Admin) AddOS(addr string, start bool) error {
 	// Agent creates an OS instance on install. Use its name for the Prom
 	// host alias.
 	instances, err := a.localAgentInstances()
@@ -137,16 +136,33 @@ func (a *Admin) AddOS(addr string) error {
 	}
 	os := instances["os"][0]
 
-	// Add new host to Prom and it will start scraping from this client.
-	host := pp.Host{
-		Address: addr,
-		Alias:   os.Name,
-	}
-	hostBytes, _ := json.Marshal(host)
-	url := a.api.URL(a.config.ServerAddress+":"+PROM_API_PORT, "hosts", "os")
-	resp, _, err := a.api.Post(url, hostBytes)
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+	if start {
+		// First start the node_exporter process locally via the metrics API
+		// (percona-metrics), else Prom won't have any process to scrape from.
+		exp := proto.Exporter{
+			Name:  "node_exporter",
+			Alias: os.Name + " metrics",
+			Port:  "9100",
+			Args:  []string{"-collectors.enabled=diskstats,filesystem,loadavg,meminfo,netdev,netstat,stat,time,uname,vmstat"},
+		}
+		if err := a.startExporter(exp); err != nil {
+			return err
+		}
+
+		// Add new host to Prom and it will start scraping from this client.
+		host := proto.Host{
+			Address: addr,
+			Alias:   os.Name,
+		}
+		hostBytes, _ := json.Marshal(host)
+		url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "os")
+		resp, _, err := a.api.Post(url, hostBytes)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusCreated {
+			return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+		}
 	}
 
 	// Set OS locally.
@@ -157,7 +173,7 @@ func (a *Admin) AddOS(addr string) error {
 
 func (a *Admin) RemoveOS(name string) error {
 	// Remove the host from Prom.
-	url := a.api.URL(a.config.ServerAddress+":"+PROM_API_PORT, "hosts", "os", name)
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "os", name)
 	resp, _, err := a.api.Delete(url)
 	if err != nil {
 		return err
@@ -173,24 +189,12 @@ func (a *Admin) RemoveOS(name string) error {
 	return nil
 }
 
-func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error {
+func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]string) error {
 	var bytes []byte
 
 	// User must first add the OS which sets the client address.
 	if a.config.ClientAddress == "" {
 		return ErrNoOS
-	}
-
-	// Add new MySQL host to Prom and it will start scraping from this client.
-	host := pp.Host{
-		Address: a.config.ClientAddress,
-		Alias:   name,
-	}
-	hostBytes, _ := json.Marshal(host)
-	url := a.api.URL(a.config.ServerAddress+":"+PROM_API_PORT, "hosts", "mysql")
-	resp, _, err := a.api.Post(url, hostBytes)
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
 	}
 
 	// Get OS instance of local agent which is this system. We link new MySQL
@@ -217,8 +221,8 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 		Version:    info["version"],
 	}
 	inBytes, _ := json.Marshal(in)
-	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "instances")
-	resp, _, err = a.api.Post(url, inBytes)
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "instances")
+	resp, _, err := a.api.Post(url, inBytes)
 	if err != nil {
 		return err
 	}
@@ -227,7 +231,7 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 	}
 
 	// The URI of the new instance is reported in the Location header; fetch it.
-	//url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, resp.Header.Get("Location"))
+	//url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, resp.Header.Get("Location"))
 	url = resp.Header.Get("Location")
 	resp, bytes, err = a.api.Get(url)
 	if err != nil {
@@ -238,6 +242,35 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 	}
 	if err := json.Unmarshal(bytes, &in); err != nil {
 		return err
+	}
+
+	// Return now if just adding the MySQL instance, else below here we start
+	// collecting metrics and queries.
+	if !start {
+		return nil
+	}
+
+	// First start the 3 mysqld_exporter processes locally via the metrics API
+	// (percona-metrics), else Prom won't have any process to scrape from. We
+	// pass the MySQL instance UUID because the metrics API uses it to fetch
+	// the DSN so it can run "DATA_SOURCE_NAME=<DSN> mysqld_exporter ..."
+	if err := a.startMySQLExporters(uuid); err != nil {
+		return err
+	}
+
+	// Add new MySQL host to Prom and it will start scraping from this client.
+	host := proto.Host{
+		Address: a.config.ClientAddress,
+		Alias:   name,
+	}
+	hostBytes, _ := json.Marshal(host)
+	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mysql")
+	resp, _, err = a.api.Post(url, hostBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
 	}
 
 	// Now we have a complete instance resource with ID (UUID), so we can create
@@ -266,7 +299,7 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 
 	// Send the StartTool cmd to the API which relays it to the agent, then
 	// relays the agent's reply back to here.
-	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "agents", agentId, "cmd")
+	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
 	resp, _, err = a.api.Put(url, cmdBytes)
 	if err != nil {
 		return err
@@ -280,7 +313,7 @@ func (a *Admin) AddMySQL(name, dsn, source string, info map[string]string) error
 
 func (a *Admin) RemoveMySQL(name string) error {
 	// Remove the host from Prom.
-	url := a.api.URL(a.config.ServerAddress+":"+PROM_API_PORT, "hosts", "mysql", name)
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mysql", name)
 	resp, _, err := a.api.Delete(url)
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -288,6 +321,11 @@ func (a *Admin) RemoveMySQL(name string) error {
 		// warn?
 	default:
 		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+
+	// Stop the 3 local mysqld_exporter processes.
+	if err := a.stopMySQLExporters(); err != nil {
+		return err
 	}
 
 	// Get local agent's instances to look up UUID of MySQL instance by name.
@@ -322,7 +360,7 @@ func (a *Admin) RemoveMySQL(name string) error {
 	}
 	cmdBytes, _ := json.Marshal(cmd)
 
-	url = a.api.URL(a.config.ServerAddress+":"+QAN_API_PORT, "agents", agentId, "cmd")
+	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
 	resp, _, err = a.api.Put(url, cmdBytes)
 	if err != nil {
 		return err
@@ -341,8 +379,8 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	}
 
 	// Returns {"mysql":[{"Alias":"beatrice.local","Address":"127.0.0.2"}]}
-	var hosts map[string][]pp.Host
-	url := a.api.URL("localhost:"+PROM_API_PORT, "hosts")
+	var hosts map[string][]proto.Host
+	url := a.api.URL("localhost:"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts")
 	resp, bytes, err := a.api.Get(url)
 	if err != nil {
 		return nil, err
@@ -356,7 +394,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 
 	// Get local agent configs which contains any QAN configs it's running.
 	var configs []proto.AgentConfig
-	url = a.api.URL("localhost:"+AGENT_API_PORT, "configs")
+	url = a.api.URL("localhost:"+proto.DEFAULT_AGENT_API_PORT, "configs")
 	resp, bytes, err = a.api.Get(url)
 	if err != nil {
 		return nil, err
@@ -370,7 +408,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 
 	// First, let's get the local OS instance because there should only be one.
 	// In Prom, it's the one with the current client address.
-	var osHost *pp.Host
+	var osHost *proto.Host
 	for _, host := range hosts["os"] {
 		if host.Address != a.config.ClientAddress {
 			continue
@@ -389,7 +427,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 
 	// For now we only support 1 MySQL host per instance, i.e. Prom should only
 	// be scaping 1 MySQL host from this client.
-	var mysqlHost *pp.Host
+	var mysqlHost *proto.Host
 	for _, host := range hosts["mysql"] {
 		if host.Address != a.config.ClientAddress {
 			continue
@@ -400,7 +438,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 
 	// Get local agent instance to verify that Prom MySQL host = agent QAN host.
 	var instances map[string][]proto.Instance
-	url = a.api.URL("localhost:"+AGENT_API_PORT, "instances")
+	url = a.api.URL("localhost:"+proto.DEFAULT_AGENT_API_PORT, "instances")
 	resp, bytes, err = a.api.Get(url)
 	if err != nil {
 		return nil, err
@@ -456,13 +494,6 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	return status, nil
 }
 
-// --------------------------------------------------------------------------
-
-func (a *Admin) writeConfig() error {
-	bytes, _ := yaml.Marshal(a.config)
-	return ioutil.WriteFile(a.filename, bytes, 0644)
-}
-
 func FileExists(file string) bool {
 	_, err := os.Stat(file)
 	if err == nil {
@@ -474,8 +505,15 @@ func FileExists(file string) bool {
 	return true
 }
 
+// --------------------------------------------------------------------------
+
+func (a *Admin) writeConfig() error {
+	bytes, _ := yaml.Marshal(a.config)
+	return ioutil.WriteFile(a.filename, bytes, 0644)
+}
+
 func (a *Admin) localAgentId() (string, error) {
-	url := a.api.URL("localhost:"+AGENT_API_PORT, "id")
+	url := a.api.URL("localhost:"+proto.DEFAULT_AGENT_API_PORT, "id")
 	resp, bytes, err := a.api.Get(url)
 	if err != nil {
 		return "", err
@@ -487,7 +525,7 @@ func (a *Admin) localAgentId() (string, error) {
 }
 
 func (a *Admin) localAgentInstances() (map[string][]proto.Instance, error) {
-	url := a.api.URL("localhost:"+AGENT_API_PORT, "instances")
+	url := a.api.URL("localhost:"+proto.DEFAULT_AGENT_API_PORT, "instances")
 	resp, bytes, err := a.api.Get(url)
 	if err != nil {
 		return nil, err
@@ -500,4 +538,129 @@ func (a *Admin) localAgentInstances() (map[string][]proto.Instance, error) {
 		return nil, err
 	}
 	return instances, nil
+}
+
+func (a *Admin) startMySQLExporters(uuid string) error {
+	exp := proto.Exporter{
+		Name:         "mysqld_exporter",
+		Alias:        "high res",
+		Port:         "9104",
+		InstanceUUID: uuid,
+		Args: []string{
+			"-web.listen-address=" + a.config.ClientAddress + ":9104",
+			"-collect.global_status=true",
+			"-collect.global_variables=false",
+			"-collect.slave_status=false",
+			"-collect.info_schema.tables=false",
+			"-collect.binlog_size=false",
+			"-collect.info_schema.processlist=false",
+			"-collect.info_schema.userstats=false",
+			"-collect.info_schema.tables=false",
+			"-collect.auto_increment.columns=false",
+			"-collect.info_schema.tablestats=false",
+			"-collect.perf_schema.file_events=false",
+			"-collect.perf_schema.eventsstatements=false",
+			"-collect.perf_schema.indexiowaits=false",
+			"-collect.perf_schema.tableiowaits=false",
+			"-collect.perf_schema.tablelocks=false",
+			"-collect.perf_schema.eventswaits=false",
+		},
+	}
+	if err := a.startExporter(exp); err != nil {
+		return err
+	}
+
+	exp = proto.Exporter{
+		Name:         "mysqld_exporter",
+		Alias:        "medium res",
+		Port:         "9105",
+		InstanceUUID: uuid,
+		Args: []string{
+			"-web.listen-address=" + a.config.ClientAddress + ":9105",
+			"-collect.global_status=false",
+			"-collect.global_variables=false",
+			"-collect.slave_status=true",
+			"-collect.info_schema.tables=false",
+			"-collect.binlog_size=false",
+			"-collect.info_schema.processlist=true",
+			"-collect.info_schema.userstats=false",
+			"-collect.info_schema.tables=false",
+			"-collect.auto_increment.columns=false",
+			"-collect.info_schema.tablestats=false",
+			"-collect.perf_schema.file_events=true",
+			"-collect.perf_schema.eventsstatements=false",
+			"-collect.perf_schema.indexiowaits=false",
+			"-collect.perf_schema.tableiowaits=false",
+			"-collect.perf_schema.tablelocks=false",
+			"-collect.perf_schema.eventswaits=true",
+		},
+	}
+	if err := a.startExporter(exp); err != nil {
+		return err
+	}
+
+	exp = proto.Exporter{
+		Name:         "mysqld_exporter",
+		Alias:        "low res",
+		Port:         "9106",
+		InstanceUUID: uuid,
+		Args: []string{
+			"-web.listen-address=" + a.config.ClientAddress + ":9106",
+			"-collect.global_status=false",
+			"-collect.global_variables=true",
+			"-collect.slave_status=false",
+			"-collect.info_schema.tables=true",
+			"-collect.binlog_size=false",
+			"-collect.info_schema.processlist=false",
+			"-collect.info_schema.userstats=true",
+			"-collect.info_schema.tables=true",
+			"-collect.auto_increment.columns=true",
+			"-collect.info_schema.tablestats=true",
+			"-collect.perf_schema.file_events=false",
+			"-collect.perf_schema.eventsstatements=true",
+			"-collect.perf_schema.indexiowaits=true",
+			"-collect.perf_schema.tableiowaits=true",
+			"-collect.perf_schema.tablelocks=false",
+			"-collect.perf_schema.eventswaits=false",
+		},
+	}
+	if err := a.startExporter(exp); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (a *Admin) stopMySQLExporters() error {
+	for _, port := range []string{"9104", "9105", "9106"} {
+		if err := a.stopExporter("mysqld_exporter", port); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *Admin) startExporter(exp proto.Exporter) error {
+	expBytes, _ := json.Marshal(exp)
+	url := a.api.URL("localhost:" + proto.DEFAULT_METRICS_API_PORT)
+	resp, _, err := a.api.Post(url, expBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+	}
+	return nil
+}
+
+func (a *Admin) stopExporter(name, port string) error {
+	url := a.api.URL("localhost:"+proto.DEFAULT_METRICS_API_PORT, name, port)
+	resp, _, err := a.api.Delete(url)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+	}
+	return nil
 }

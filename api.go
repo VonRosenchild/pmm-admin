@@ -29,12 +29,6 @@ import (
 	"time"
 )
 
-var (
-	AGENT_API_PORT string = "9000"
-	QAN_API_PORT   string = "9001"
-	PROM_API_PORT  string = "9003"
-)
-
 type API struct {
 	headers  map[string]string
 	hostname string
