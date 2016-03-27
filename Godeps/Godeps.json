@@ -4,7 +4,6 @@
 	"Deps": [
 		{
 			"ImportPath": "github.com/go-sql-driver/mysql",
-			"Comment": "v1.2-139-g6fd058c",
 			"Rev": "6fd058ce0d6b7ee43174e80d5a3e7f483c4dfbe5"
 		},
 		{
@@ -17,12 +16,7 @@
 		},
 		{
 			"ImportPath": "github.com/percona/platform/proto",
-			"Comment": "rc2-39-gd7b4cb6",
-			"Rev": "d7b4cb61887443009067b7cade8f9d5cc86f7364"
-		},
-		{
-			"ImportPath": "github.com/percona/prom-config-api/prom",
-			"Rev": "b11677b42a459b41546b52f8b5484d004c0dc284"
+			"Rev": "a9b4d1e86b058c9283035509f27d55b679ec798a"
 		},
 		{
 			"ImportPath": "gopkg.in/yaml.v2",
