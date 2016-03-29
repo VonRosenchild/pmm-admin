@@ -115,7 +115,7 @@ func (a *Admin) OS() (proto.Instance, error) {
 		return in, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return in, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return in, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
 	if err := json.Unmarshal(bytes, &in); err != nil {
 		return in, err
@@ -156,12 +156,12 @@ func (a *Admin) AddOS(addr string, start bool) error {
 		}
 		hostBytes, _ := json.Marshal(host)
 		url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "os")
-		resp, _, err := a.api.Post(url, hostBytes)
+		resp, content, err := a.api.Post(url, hostBytes)
 		if err != nil {
 			return err
 		}
 		if resp.StatusCode != http.StatusCreated {
-			return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+			return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
 		}
 	}
 
@@ -174,7 +174,7 @@ func (a *Admin) AddOS(addr string, start bool) error {
 func (a *Admin) RemoveOS(name string) error {
 	// Remove the host from Prom.
 	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "os", name)
-	resp, _, err := a.api.Delete(url)
+	resp, content, err := a.api.Delete(url)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func (a *Admin) RemoveOS(name string) error {
 	case http.StatusNotFound:
 		// warn?
 	default:
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	return nil
@@ -222,12 +222,12 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	}
 	inBytes, _ := json.Marshal(in)
 	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "instances")
-	resp, _, err := a.api.Post(url, inBytes)
+	resp, content, err := a.api.Post(url, inBytes)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusCreated, content)
 	}
 
 	// The URI of the new instance is reported in the Location header; fetch it.
@@ -238,7 +238,7 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
 	if err := json.Unmarshal(bytes, &in); err != nil {
 		return err
@@ -265,12 +265,12 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	}
 	hostBytes, _ := json.Marshal(host)
 	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mysql")
-	resp, _, err = a.api.Post(url, hostBytes)
+	resp, content, err = a.api.Post(url, hostBytes)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusCreated, content)
 	}
 
 	// Now we have a complete instance resource with ID (UUID), so we can create
@@ -300,12 +300,12 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	// Send the StartTool cmd to the API which relays it to the agent, then
 	// relays the agent's reply back to here.
 	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
-	resp, _, err = a.api.Put(url, cmdBytes)
+	resp, content, err = a.api.Put(url, cmdBytes)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	return nil
@@ -314,13 +314,13 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 func (a *Admin) RemoveMySQL(name string) error {
 	// Remove the host from Prom.
 	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mysql", name)
-	resp, _, err := a.api.Delete(url)
+	resp, content, err := a.api.Delete(url)
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
 		// warn?
 	default:
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	// Stop the 3 local mysqld_exporter processes.
@@ -361,12 +361,12 @@ func (a *Admin) RemoveMySQL(name string) error {
 	cmdBytes, _ := json.Marshal(cmd)
 
 	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
-	resp, _, err = a.api.Put(url, cmdBytes)
+	resp, content, err = a.api.Put(url, cmdBytes)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	return nil
@@ -386,7 +386,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return nil, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
 	if err := json.Unmarshal(bytes, &hosts); err != nil {
 		return nil, err
@@ -400,7 +400,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return nil, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
 	if err := json.Unmarshal(bytes, &configs); err != nil {
 		return nil, err
@@ -444,7 +444,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return nil, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
 	if err := json.Unmarshal(bytes, &instances); err != nil {
 		return nil, err
@@ -519,7 +519,7 @@ func (a *Admin) localAgentId() (string, error) {
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return "", a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
 	return string(bytes), nil
 }
@@ -531,7 +531,7 @@ func (a *Admin) localAgentInstances() (map[string][]proto.Instance, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return nil, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
 	instances := map[string][]proto.Instance{}
 	if err := json.Unmarshal(bytes, &instances); err != nil {
@@ -643,24 +643,38 @@ func (a *Admin) stopMySQLExporters() error {
 func (a *Admin) startExporter(exp proto.Exporter) error {
 	expBytes, _ := json.Marshal(exp)
 	url := a.api.URL("localhost:" + proto.DEFAULT_METRICS_API_PORT)
-	resp, _, err := a.api.Post(url, expBytes)
+	resp, content, err := a.api.Post(url, expBytes)
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 201", url, resp.StatusCode)
+	switch resp.StatusCode {
+	case http.StatusCreated:
+		// success
+	case http.StatusConflict:
+		if err := a.stopExporter(exp.Name, exp.Port); err != nil {
+			return err
+		}
+		resp, content, err := a.api.Post(url, expBytes) // try again
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusCreated {
+			return a.api.Error("(2) POST", url, resp.StatusCode, http.StatusCreated, content)
+		}
+	default:
+		return a.api.Error("(1) POST", url, resp.StatusCode, http.StatusCreated, content)
 	}
-	return nil
+	return nil // success
 }
 
 func (a *Admin) stopExporter(name, port string) error {
 	url := a.api.URL("localhost:"+proto.DEFAULT_METRICS_API_PORT, name, port)
-	resp, _, err := a.api.Delete(url)
+	resp, content, err := a.api.Delete(url)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: API returned HTTP status code %d, expected 200", url, resp.StatusCode)
+		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
 	}
 	return nil
 }

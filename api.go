@@ -20,6 +20,7 @@ package pmm
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,6 +28,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/percona/platform/proto"
 )
 
 type API struct {
@@ -139,6 +142,20 @@ func (a *API) Put(url string, data []byte) (*http.Response, []byte, error) {
 
 func (a *API) Delete(url string) (*http.Response, []byte, error) {
 	return a.send("DELETE", url, nil)
+}
+
+func (a *API) Error(method, url string, gotStatusCode, expectedStatusCode int, content []byte) error {
+	errMsg := fmt.Sprintf("%s %s: API returned HTTP status code %d, expected %d",
+		method, url, gotStatusCode, expectedStatusCode)
+	if len(content) > 0 {
+		var apiErr proto.Error
+		if err := json.Unmarshal(content, &apiErr); err != nil {
+			errMsg += ": " + string(content)
+		} else {
+			errMsg += ": " + apiErr.Error
+		}
+	}
+	return fmt.Errorf(errMsg)
 }
 
 // --------------------------------------------------------------------------
