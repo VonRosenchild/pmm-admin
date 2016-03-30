@@ -181,11 +181,10 @@ func (a *Admin) RemoveOS(name string) error {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		// warn?
+		fmt.Printf("prom-config-api is not monitoring OS instance %s\n", name)
 	default:
 		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
 	}
-
 	return nil
 }
 
@@ -318,7 +317,7 @@ func (a *Admin) RemoveMySQL(name string) error {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		// warn?
+		fmt.Printf("prom-config-api is not monitoring MySQL instance %s\n", name)
 	default:
 		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
 	}
@@ -342,7 +341,8 @@ func (a *Admin) RemoveMySQL(name string) error {
 		break
 	}
 	if mysqlInstance == nil {
-		return nil // not found, warn?
+		fmt.Printf("percona-qan-agent is not monitoring MySQL instance %s\n", name)
+		return nil
 	}
 
 	// Send the StopTool cmd to the API which relays it to the agent, then
@@ -380,7 +380,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 
 	// Returns {"mysql":[{"Alias":"beatrice.local","Address":"127.0.0.2"}]}
 	var hosts map[string][]proto.Host
-	url := a.api.URL("localhost:"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts")
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts")
 	resp, bytes, err := a.api.Get(url)
 	if err != nil {
 		return nil, err
