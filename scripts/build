@@ -149,7 +149,7 @@ fi
 cp ../bin/$BIN/$BIN $PKG_NAME/
 
 # Tarball the pkg dir
-tar cvfz $PKG_NAME.tar.gz $PKG_NAME/ > /dev/null
+tar cfz $PKG_NAME.tar.gz $PKG_NAME/ > /dev/null
 
 echo
 echo "Done building distro/$PKG_NAME.tar.gz"
