@@ -24,9 +24,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"strings"
 
-	"github.com/nu7hatch/gouuid"
 	"github.com/percona/platform/proto"
 	"gopkg.in/yaml.v2"
 )
@@ -208,16 +206,15 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	}
 
 	// Add new MySQL instance to QAN.
-	u4, _ := uuid.NewV4()
-	uuid := strings.Replace(u4.String(), "-", "", -1)
 	in := proto.Instance{
 		Subsystem:  "mysql",
 		ParentUUID: instances["os"][0].UUID,
-		UUID:       uuid,
-		Name:       name,
-		DSN:        dsn,
-		Distro:     info["distro"],
-		Version:    info["version"],
+		Name:       name, // unique ID
+		// Do not set UUID here, let API do it because if we get a StatusConflict
+		// below, we want the existing instance UUID
+		DSN:     dsn,
+		Distro:  info["distro"],
+		Version: info["version"],
 	}
 	inBytes, _ := json.Marshal(in)
 	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "instances")
@@ -225,8 +222,12 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusCreated {
-		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusCreated, content)
+	switch resp.StatusCode {
+	case http.StatusCreated:
+	case http.StatusConflict:
+		// instance already exists based on Name
+	default:
+		return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
 	}
 
 	// The URI of the new instance is reported in the Location header; fetch it.
@@ -242,6 +243,8 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	if err := json.Unmarshal(bytes, &in); err != nil {
 		return err
 	}
+
+	uuid := in.UUID
 
 	// Return now if just adding the MySQL instance, else below here we start
 	// collecting metrics and queries.
@@ -283,28 +286,13 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 
 	// Create a QAN config with no explicitly set vars and agent will use
 	// built-in defaults. Then wrap the config in a StartTool cmd.
+	a.stopQAN(agentId, in)
 	qanConfig := map[string]string{
 		"UUID":        in.UUID,
 		"CollectFrom": source,
 	}
-	qanConfigBytes, _ := json.Marshal(qanConfig)
-	cmd := proto.Cmd{
-		User:    "pmm-admin@" + a.api.Hostname(),
-		Service: "qan",
-		Cmd:     "StartTool",
-		Data:    qanConfigBytes,
-	}
-	cmdBytes, _ := json.Marshal(cmd)
-
-	// Send the StartTool cmd to the API which relays it to the agent, then
-	// relays the agent's reply back to here.
-	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
-	resp, content, err = a.api.Put(url, cmdBytes)
-	if err != nil {
+	if err := a.startQAN(agentId, in, qanConfig); err != nil {
 		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	return nil
@@ -345,28 +333,13 @@ func (a *Admin) RemoveMySQL(name string) error {
 		return nil
 	}
 
-	// Send the StopTool cmd to the API which relays it to the agent, then
-	// relays the agent's reply back to here.
+	// Stop QAN for this MySQL instance on the local agent.
 	agentId, err := a.localAgentId()
 	if err != nil {
 		return err
 	}
-
-	cmd := proto.Cmd{
-		User:    "pmm-admin@" + a.api.Hostname(),
-		Service: "qan",
-		Cmd:     "StopTool",
-		Data:    []byte(mysqlInstance.UUID),
-	}
-	cmdBytes, _ := json.Marshal(cmd)
-
-	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
-	resp, content, err = a.api.Put(url, cmdBytes)
-	if err != nil {
+	if err := a.stopQAN(agentId, *mysqlInstance); err != nil {
 		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	return nil
@@ -673,8 +646,59 @@ func (a *Admin) stopExporter(name, port string) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		fmt.Printf("percona-prom-pm is not running %s:%s\n", name, port)
+	default:
 		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
 	}
+	return nil
+}
+
+func (a *Admin) startQAN(agentId string, in proto.Instance, config map[string]string) error {
+	configBytes, _ := json.Marshal(config)
+	cmd := proto.Cmd{
+		User:    "pmm-admin@" + a.api.Hostname(),
+		Service: "qan",
+		Cmd:     "StartTool",
+		Data:    configBytes,
+	}
+	cmdBytes, _ := json.Marshal(cmd)
+
+	// Send the StartTool cmd to the API which relays it to the agent, then
+	// relays the agent's reply back to here.
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
+	resp, content, err := a.api.Put(url, cmdBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
+	}
+
+	return nil
+}
+
+func (a *Admin) stopQAN(agentId string, in proto.Instance) error {
+	cmd := proto.Cmd{
+		User:    "pmm-admin@" + a.api.Hostname(),
+		Service: "qan",
+		Cmd:     "StopTool",
+		Data:    []byte(in.UUID),
+	}
+	cmdBytes, _ := json.Marshal(cmd)
+
+	// Send the StartTool cmd to the API which relays it to the agent, then
+	// relays the agent's reply back to here.
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, "agents", agentId, "cmd")
+	resp, content, err := a.api.Put(url, cmdBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
+	}
+
 	return nil
 }
