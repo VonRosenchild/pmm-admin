@@ -290,7 +290,7 @@ func main() {
 
 			if err := admin.AddMySQL(name, agentDSN.String(), flagQuerySource, flagStart, info); err != nil {
 				if err == pmm.ErrHostConflict {
-					hostConflictError("OS", admin.Server())
+					hostConflictError("MySQL", admin.Server())
 				} else {
 					fmt.Printf("Error adding MySQL: %s\n", err)
 				}
