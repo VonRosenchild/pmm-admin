@@ -32,8 +32,9 @@ import (
 var VERSION string = "1.0.0"
 
 var (
-	ErrNotFound = errors.New("resource not found")
-	ErrNoOS     = errors.New("OS not set")
+	ErrNotFound     = errors.New("resource not found")
+	ErrNoOS         = errors.New("OS not set")
+	ErrHostConflict = errors.New("host conflict")
 )
 
 type Config struct {
@@ -158,7 +159,20 @@ func (a *Admin) AddOS(addr string, start bool) error {
 		if err != nil {
 			return err
 		}
-		if resp.StatusCode != http.StatusCreated {
+		switch resp.StatusCode {
+		case http.StatusCreated:
+			// success
+		case http.StatusConflict:
+			oldHost, err := a.getHost("os", host.Alias)
+			if err != nil {
+				return err
+			}
+			if oldHost.Address == host.Address {
+				fmt.Printf("prom-config-api is already monitoring OS instance %s\n", host.Alias)
+			} else {
+				return ErrHostConflict
+			}
+		default:
 			return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
 		}
 	}
@@ -271,8 +285,21 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode != http.StatusCreated {
-		return a.api.Error("PUT", url, resp.StatusCode, http.StatusCreated, content)
+	switch resp.StatusCode {
+	case http.StatusCreated:
+		// success
+	case http.StatusConflict:
+		oldHost, err := a.getHost("mysql", host.Alias)
+		if err != nil {
+			return err
+		}
+		if oldHost.Address == host.Address {
+			fmt.Printf("prom-config-api is already monitoring MySQL instance %s\n", host.Alias)
+		} else {
+			return ErrHostConflict
+		}
+	default:
+		return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
 	}
 
 	// Now we have a complete instance resource with ID (UUID), so we can create
@@ -701,4 +728,25 @@ func (a *Admin) stopQAN(agentId string, in proto.Instance) error {
 	}
 
 	return nil
+}
+
+func (a *Admin) getHost(hostType, alias string) (proto.Host, error) {
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts")
+	resp, content, err := a.api.Get(url)
+	if err != nil {
+		return proto.Host{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return proto.Host{}, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, content)
+	}
+	var hosts map[string][]proto.Host
+	if err := json.Unmarshal(content, &hosts); err != nil {
+		return proto.Host{}, err
+	}
+	for _, host := range hosts[hostType] {
+		if host.Alias == alias {
+			return host, nil
+		}
+	}
+	return proto.Host{}, ErrNotFound
 }

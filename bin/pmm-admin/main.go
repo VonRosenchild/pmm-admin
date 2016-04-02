@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/percona/go-mysql/dsn"
+	"github.com/percona/platform/proto"
 	pmm "github.com/percona/pmm-admin"
 )
 
@@ -209,7 +210,11 @@ func main() {
 			}
 			addr := args[2]
 			if err := admin.AddOS(addr, flagStart); err != nil {
-				fmt.Printf("Error adding OS: %s\n", err)
+				if err == pmm.ErrHostConflict {
+					hostConflictError("OS", admin.Server())
+				} else {
+					fmt.Printf("Error adding OS: %s\n", err)
+				}
 				os.Exit(1)
 			}
 			if err := admin.LoadConfig(flagConfig); err != nil {
@@ -284,7 +289,11 @@ func main() {
 			}
 
 			if err := admin.AddMySQL(name, agentDSN.String(), flagQuerySource, flagStart, info); err != nil {
-				fmt.Printf("Error adding MySQL: %s\n", err)
+				if err == pmm.ErrHostConflict {
+					hostConflictError("OS", admin.Server())
+				} else {
+					fmt.Printf("Error adding MySQL: %s\n", err)
+				}
 				os.Exit(1)
 			}
 			if flagStart {
@@ -366,4 +375,11 @@ func help(args []string) {
 			fmt.Printf("Unknown comand: %s\n", cmd)
 		}
 	}
+}
+
+func hostConflictError(what, serverAddr string) {
+	fmt.Printf("Cannot add %s because a host with the same name but a different address already exists."+
+		" This can happen if two clients have the same hostname but different addresses."+
+		" To see which %s hosts already exist, run:\n\tpmm-admin list\n\tcurl http://%s:%s/hosts\n",
+		what, what, serverAddr, proto.DEFAULT_PROM_CONFIG_API_PORT)
 }
