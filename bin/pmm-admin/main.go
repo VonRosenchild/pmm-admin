@@ -341,7 +341,7 @@ func help(args []string) {
 			"  [] = optional\n" +
 			"  [options] (-user, -password, etc.) must precede the <command>\n\n" +
 			"Example:\n" +
-			"  pmm-admin -agent-user percona -password percona add mysql\n\n" +
+			"  pmm-admin -agent-user percona -agent-password percona add mysql\n\n" +
 			"The -config file must exist and be initialized by running the" +
 			" 'server <address[:port]>' and 'add os <address>' commands.\n\n" +
 			"Run 'pmm-admin help options' to list [options]\n" +
