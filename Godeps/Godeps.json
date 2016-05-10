@@ -15,8 +15,8 @@
 			"Rev": "eb77a8a5ff057a594f8e69e8243fa20b84c0be17"
 		},
 		{
-			"ImportPath": "github.com/percona/platform/proto",
-			"Rev": "a9b4d1e86b058c9283035509f27d55b679ec798a"
+			"ImportPath": "github.com/percona/pmm/proto",
+			"Rev": "32d3b3fa64dda7dbe3a9ad4a678ab087e8561f3b"
 		},
 		{
 			"ImportPath": "gopkg.in/yaml.v2",

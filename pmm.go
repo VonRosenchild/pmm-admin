@@ -25,7 +25,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/percona/platform/proto"
+	"github.com/percona/pmm/proto"
 	"gopkg.in/yaml.v2"
 )
 
@@ -197,6 +197,12 @@ func (a *Admin) RemoveOS(name string) error {
 	default:
 		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
 	}
+
+	// Stop node_exporter process.
+	if err := a.stopExporter("node_exporter", "9100"); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -372,10 +378,85 @@ func (a *Admin) RemoveMySQL(name string) error {
 	return nil
 }
 
+func (a *Admin) AddMongoDB(name string, start bool) error {
+	// User must first add the OS which sets the client address.
+	if a.config.ClientAddress == "" {
+		return ErrNoOS
+	}
+
+	if !start {
+		return nil
+	}
+
+	exp := proto.Exporter{
+		Name:  "mongodb_exporter",
+		Alias: "MongoDB metrics",
+		Port:  "9107",
+		Args:  []string{"-web.listen-address=" + a.config.ClientAddress + ":9107"},
+	}
+	if err := a.startExporter(exp); err != nil {
+		return err
+	}
+
+	// Add new MongoDB host to Prom and it will start scraping from this client.
+	host := proto.Host{
+		Address: a.config.ClientAddress,
+		Alias:   name,
+	}
+	hostBytes, _ := json.Marshal(host)
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mongodb")
+	resp, content, err := a.api.Post(url, hostBytes)
+	if err != nil {
+		return err
+	}
+	switch resp.StatusCode {
+	case http.StatusCreated:
+		// success
+	case http.StatusConflict:
+		oldHost, err := a.getHost("mongodb", host.Alias)
+		if err != nil {
+			return err
+		}
+		if oldHost.Address == host.Address {
+			fmt.Printf("prom-config-api is already monitoring MongoDB instance %s\n", host.Alias)
+		} else {
+			return ErrHostConflict
+		}
+	default:
+		return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
+	}
+
+	return nil
+}
+
+func (a *Admin) RemoveMongoDB(name string) error {
+	// Remove the host from Prom.
+	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mongodb", name)
+	resp, content, err := a.api.Delete(url)
+	if err != nil {
+		return err
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		fmt.Printf("prom-config-api is not monitoring OS instance %s\n", name)
+	default:
+		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
+	}
+
+	// Stop mongodb_exporter process.
+	if err := a.stopExporter("mongodb_exporter", "9107"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	status := map[string][]InstanceStatus{
-		"os":    []InstanceStatus{},
-		"mysql": []InstanceStatus{},
+		"os":      []InstanceStatus{},
+		"mysql":   []InstanceStatus{},
+		"mongodb": []InstanceStatus{},
 	}
 
 	// Returns {"mysql":[{"Alias":"beatrice.local","Address":"127.0.0.2"}]}
@@ -426,7 +507,7 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	}
 
 	// For now we only support 1 MySQL host per instance, i.e. Prom should only
-	// be scaping 1 MySQL host from this client.
+	// be scraping 1 MySQL host from this client.
 	var mysqlHost *proto.Host
 	for _, host := range hosts["mysql"] {
 		if host.Address != a.config.ClientAddress {
@@ -595,7 +676,7 @@ func (a *Admin) startMySQLExporters(uuid string) error {
 			"-collect.perf_schema.eventsstatements=false",
 			"-collect.perf_schema.indexiowaits=false",
 			"-collect.perf_schema.tableiowaits=false",
-			"-collect.perf_schema.tablelocks=false",
+			"-collect.perf_schema.tablelocks=true",
 			"-collect.perf_schema.eventswaits=true",
 		},
 	}

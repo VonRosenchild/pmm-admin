@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/percona/platform/proto"
+	"github.com/percona/pmm/proto"
 )
 
 type API struct {

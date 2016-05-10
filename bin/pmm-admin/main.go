@@ -25,7 +25,7 @@ import (
 	"strings"
 
 	"github.com/percona/go-mysql/dsn"
-	"github.com/percona/platform/proto"
+	"github.com/percona/pmm/proto"
 	pmm "github.com/percona/pmm-admin"
 )
 
@@ -301,6 +301,25 @@ func main() {
 			} else {
 				fmt.Printf("OK, added MySQL %s using DSN %s\n", name, dsn.HidePassword(agentDSN.String()))
 			}
+		case "mongodb":
+			if admin.ClientAddress() == "" {
+				fmt.Printf("Add OS first to set client address by running 'pmm-admin add os <address>'\n")
+				os.Exit(0)
+			}
+
+			if err := admin.AddMongoDB(name, flagStart); err != nil {
+				if err == pmm.ErrHostConflict {
+					hostConflictError("MongoDB", admin.Server())
+				} else {
+					fmt.Printf("Error adding MongoDB: %s\n", err)
+				}
+				os.Exit(1)
+			}
+			if flagStart {
+				fmt.Printf("OK, now monitoring MongoDB %s\n", name)
+			} else {
+				fmt.Printf("OK, added MongoDB %s\n", name)
+			}
 		default:
 			fmt.Printf("Invalid instance type: %s\n", instanceType)
 		}
@@ -324,6 +343,13 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Printf("OK, stopped monitoring MySQL %s\n", name)
+		}
+		case "mongodb":
+			if err := admin.RemoveMongoDB(name); err != nil {
+				fmt.Printf("Error removing MongoDB %s: %s\n", name, err)
+				os.Exit(1)
+			}
+			fmt.Printf("OK, stopped monitoring MongoDB %s\n", name)
 		}
 	default:
 		fmt.Printf("Unknown command: '%s'\n", args[0])
@@ -354,8 +380,9 @@ func help(args []string) {
 		case "add":
 			fmt.Printf("Usage: pmm-admin [options] add <instance type> [address]\n\n" +
 				"Instance types:\n" +
-				"  os     Add local OS instance and start monitoring\n" +
-				"  mysql  Add local MySQL instance and start monitoring\n\n" +
+				"  os      Add local OS instance and start monitoring\n" +
+				"  mysql   Add local MySQL instance and start monitoring\n" +
+				"  mongodb Add local MongoDB instance and start monitoring\n\n" +
 				"When adding an OS instance (this server), specify its [address].\n\n" +
 				"When adding a MySQL instance, specify -agent-user and -agent-password" +
 				" to use an existing MySQL user. Else, the agent MySQL user will be created" +
@@ -363,11 +390,12 @@ func help(args []string) {
 		case "remove":
 			fmt.Printf("Usage: pmm-admin [options] remove <instance type> <name>\n\n" +
 				"Instance types:\n" +
-				"  os     Stop monitoring local OS instance\n" +
-				"  mysql  Stop monitoring local MySQL instance\n\n" +
+				"  os      Stop monitoring local OS instance\n" +
+				"  mysql   Stop monitoring local MySQL instance\n\n" +
+				"  mongodb Stop monitoring local MongoDB instance\n\n" +
 				"Run 'pmm-admin list' to see the name of instances being monitored.\n")
 		case "list":
-			fmt.Printf("Usage: pmm-admin list\n\nList OS and local MySQL instances being monitored.\n")
+			fmt.Printf("Usage: pmm-admin list\n\nList OS, MySQL or MongoDB instances being monitored.\n")
 		case "server":
 			fmt.Printf("Usage: pmm-admin server [address[:port]]\n\n" +
 				"Prints the address of the PMM server, or sets it if [address] given.\n")
