@@ -21,11 +21,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/percona/go-mysql/dsn"
-	"github.com/percona/pmm/proto"
 	pmm "github.com/percona/pmm-admin"
 )
 
@@ -46,12 +44,14 @@ var (
 	flagMySQLMaxUserConn  int64
 	flagAgentUser         string
 	flagAgentPass         string
+	flagMongoURI          string
+	flagMongoReplSet      string
+	flagMongoCluster      string
 	flagVersion           bool
 	flagStart             bool
 )
 
 var fs *flag.FlagSet
-var portNumberRe = regexp.MustCompile(`\.\d+$`)
 
 func init() {
 	fs = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -72,11 +72,13 @@ func init() {
 	fs.Int64Var(&flagMySQLMaxUserConn, "max-user-connections", 5, "Max number of MySQL connections")
 	fs.BoolVar(&flagMySQLOldPasswords, "old-passwords", false, "Old passwords")
 
+	fs.StringVar(&flagMongoURI, "mongodb-uri", "", "MongoDB URI")
+	fs.StringVar(&flagMongoReplSet, "mongodb-replset", "", "MongoDB replSet name")
+	fs.StringVar(&flagMongoCluster, "mongodb-cluster", "", "MongoDB cluster name")
+
 	fs.BoolVar(&flagVersion, "version", false, "Print version")
 	fs.BoolVar(&flagStart, "start", true, "Start monitoring instance after add")
 }
-
-var portSuffix *regexp.Regexp = regexp.MustCompile(`:\d+$`)
 
 func main() {
 	// It flag is unknown it exist with os.Exit(10),
@@ -185,12 +187,18 @@ func main() {
 			fmt.Printf("Error getting list: %s\n", err)
 			os.Exit(1)
 		}
-		linefmt := "%7s %7s %7s %32s %s\n"
-		fmt.Printf(linefmt, "TYPE", "METRICS", "QUERIES", "UUID", "NAME")
-		fmt.Printf(linefmt, "-------", "-------", "-------", "--------------------------------", "----")
+		linefmt := "%10s %-60s %s\n"
+		fmt.Printf(linefmt, "TYPE", "NAME", "OPTIONS")
+		fmt.Printf(linefmt, strings.Repeat("-", 10), strings.Repeat("-", 60), strings.Repeat("-", 10))
 		for instanceType, instances := range list {
 			for _, in := range instances {
-				fmt.Printf(linefmt, instanceType, in.Metrics, in.Queries, in.UUID, in.Name)
+				var tags []string
+				if data, ok := in.Tags.([]interface{}); ok {
+					for _, tag := range data {
+						tags = append(tags, tag.(string))
+					}
+				}
+				fmt.Printf(linefmt, instanceType, in.Name, strings.Join(tags, ","))
 			}
 		}
 	case "add":
@@ -209,7 +217,7 @@ func main() {
 				os.Exit(1)
 			}
 			addr := args[2]
-			if err := admin.AddOS(addr, flagStart); err != nil {
+			if err := admin.AddOS(addr, flagStart, flagMongoReplSet, flagMongoCluster); err != nil {
 				if err == pmm.ErrHostConflict {
 					hostConflictError("OS", admin.Server())
 				} else {
@@ -306,8 +314,8 @@ func main() {
 				fmt.Printf("Add OS first to set client address by running 'pmm-admin add os <address>'\n")
 				os.Exit(0)
 			}
-
-			if err := admin.AddMongoDB(name, flagStart); err != nil {
+			node, _ := admin.OS()
+			if err := admin.AddMongoDB(node.Name, flagStart, flagMongoURI, flagMongoReplSet, flagMongoCluster); err != nil {
 				if err == pmm.ErrHostConflict {
 					hostConflictError("MongoDB", admin.Server())
 				} else {
@@ -316,9 +324,9 @@ func main() {
 				os.Exit(1)
 			}
 			if flagStart {
-				fmt.Printf("OK, now monitoring MongoDB %s\n", name)
+				fmt.Printf("OK, now monitoring MongoDB %s\n", node.Name)
 			} else {
-				fmt.Printf("OK, added MongoDB %s\n", name)
+				fmt.Printf("OK, added MongoDB %s\n", node.Name)
 			}
 		default:
 			fmt.Printf("Invalid instance type: %s\n", instanceType)
@@ -343,13 +351,14 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Printf("OK, stopped monitoring MySQL %s\n", name)
-		}
 		case "mongodb":
 			if err := admin.RemoveMongoDB(name); err != nil {
 				fmt.Printf("Error removing MongoDB %s: %s\n", name, err)
 				os.Exit(1)
 			}
 			fmt.Printf("OK, stopped monitoring MongoDB %s\n", name)
+		default:
+			fmt.Printf("Invalid instance type: %s\n", instanceType)
 		}
 	default:
 		fmt.Printf("Unknown command: '%s'\n", args[0])
@@ -408,6 +417,6 @@ func help(args []string) {
 func hostConflictError(what, serverAddr string) {
 	fmt.Printf("Cannot add %s because a host with the same name but a different address already exists."+
 		" This can happen if two clients have the same hostname but different addresses."+
-		" To see which %s hosts already exist, run:\n\tpmm-admin list\n\tcurl http://%s:%s/hosts\n",
-		what, what, serverAddr, proto.DEFAULT_PROM_CONFIG_API_PORT)
+		" To see which %s hosts already exist, run:\n\tpmm-admin list\n",
+		what, what)
 }

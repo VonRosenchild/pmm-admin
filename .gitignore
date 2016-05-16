@@ -1,6 +1,5 @@
 *.swp
 *.tmp
-.idea/
 distro/
 vendor/
 bin/pmm-admin/pmm-admin

@@ -29,7 +29,10 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-var VERSION string = "1.0.0"
+const (
+	VERSION     = "1.0.1"
+	CONSUL_PORT = "8500"
+)
 
 var (
 	ErrNotFound     = errors.New("resource not found")
@@ -43,12 +46,23 @@ type Config struct {
 	ServerAddress string `yaml:"server_address"`
 }
 
+type ConsulService struct {
+	Service string
+	Port    uint16
+	Tags    []string `json:"Tags,omitempty"`
+}
+
+type ConsulNode struct {
+	Node      string
+	Address   string
+	Service   ConsulService
+	ServiceID string
+}
+
 type InstanceStatus struct {
-	UUID    string
-	Type    string
-	Name    string // Alias in Prom
-	Metrics string // if scraped by Prom
-	Queries string // if local agent running QAN
+	Type string
+	Name string
+	Tags interface{}
 }
 
 type Admin struct {
@@ -123,7 +137,7 @@ func (a *Admin) OS() (proto.Instance, error) {
 	return in, nil
 }
 
-func (a *Admin) AddOS(addr string, start bool) error {
+func (a *Admin) AddOS(addr string, start bool, replset string, cluster string) error {
 	// Agent creates an OS instance on install. Use its name for the Prom
 	// host alias.
 	instances, err := a.localAgentInstances()
@@ -135,45 +149,50 @@ func (a *Admin) AddOS(addr string, start bool) error {
 	}
 	os := instances["os"][0]
 
+	// Check if Consul is already monitoring this OS.
+	ok, err := a.serviceExists(os.Name, "linux")
+	if err != nil {
+		return err
+	}
+	if ok {
+		return fmt.Errorf("PMM is already monitoring this OS instance %s", os.Name)
+	}
+
 	if start {
-		// First start the node_exporter process locally via the metrics API
-		// (percona-metrics), else Prom won't have any process to scrape from.
+		// Start node_exporter via process manager API.
 		exp := proto.Exporter{
 			Name:  "node_exporter",
-			Alias: os.Name + " metrics",
+			Alias: "System metrics",
 			Port:  "9100",
-			Args:  []string{"-collectors.enabled=diskstats,filesystem,loadavg,meminfo,netdev,netstat,stat,time,uname,vmstat"},
+			Args: []string{fmt.Sprintf("-web.listen-address=%s:9100", addr),
+				"-collectors.enabled=diskstats,filesystem,loadavg,meminfo,netdev,netstat,stat,time,uname,vmstat"},
 		}
 		if err := a.startExporter(exp); err != nil {
 			return err
 		}
 
-		// Add new host to Prom and it will start scraping from this client.
-		host := proto.Host{
+		// Add linux service to Consul.
+		var tags []string
+		if replset != "" {
+			tags = append(tags, fmt.Sprintf("replset_%s", replset))
+		}
+		if cluster != "" {
+			tags = append(tags, fmt.Sprintf("cluster_%s", cluster))
+		}
+
+		host := ConsulNode{
+			Node:    os.Name,
 			Address: addr,
-			Alias:   os.Name,
+			Service: ConsulService{Service: "linux", Port: 9100, Tags: tags},
 		}
 		hostBytes, _ := json.Marshal(host)
-		url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "os")
-		resp, content, err := a.api.Post(url, hostBytes)
+		url := a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "register")
+		resp, content, err := a.api.Put(url, hostBytes)
 		if err != nil {
 			return err
 		}
-		switch resp.StatusCode {
-		case http.StatusCreated:
-			// success
-		case http.StatusConflict:
-			oldHost, err := a.getHost("os", host.Alias)
-			if err != nil {
-				return err
-			}
-			if oldHost.Address == host.Address {
-				fmt.Printf("prom-config-api is already monitoring OS instance %s\n", host.Alias)
-			} else {
-				return ErrHostConflict
-			}
-		default:
-			return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
+		if resp.StatusCode != http.StatusOK {
+			return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 		}
 	}
 
@@ -184,18 +203,28 @@ func (a *Admin) AddOS(addr string, start bool) error {
 }
 
 func (a *Admin) RemoveOS(name string) error {
-	// Remove the host from Prom.
-	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "os", name)
-	resp, content, err := a.api.Delete(url)
+	// Check if Consul is already monitoring this OS.
+	ok, err := a.serviceExists(name, "linux")
 	if err != nil {
 		return err
 	}
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusNotFound:
-		fmt.Printf("prom-config-api is not monitoring OS instance %s\n", name)
-	default:
-		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
+	if !ok {
+		return fmt.Errorf("PMM is not monitoring this OS instance")
+	}
+
+	// Remove service from Consul.
+	host := ConsulNode{
+		Node:      name,
+		ServiceID: "linux",
+	}
+	hostBytes, _ := json.Marshal(host)
+	url := a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "deregister")
+	resp, content, err := a.api.Put(url, hostBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	// Stop node_exporter process.
@@ -251,7 +280,6 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 	}
 
 	// The URI of the new instance is reported in the Location header; fetch it.
-	//url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_QAN_API_PORT, resp.Header.Get("Location"))
 	url = resp.Header.Get("Location")
 	resp, bytes, err = a.api.Get(url)
 	if err != nil {
@@ -280,32 +308,31 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 		return err
 	}
 
-	// Add new MySQL host to Prom and it will start scraping from this client.
-	host := proto.Host{
-		Address: a.config.ClientAddress,
-		Alias:   name,
-	}
-	hostBytes, _ := json.Marshal(host)
-	url = a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mysql")
-	resp, content, err = a.api.Post(url, hostBytes)
+	// Check if Consul is already monitoring this MySQL.
+	ok, err := a.serviceExists(name, "mysql-hr")
 	if err != nil {
 		return err
 	}
-	switch resp.StatusCode {
-	case http.StatusCreated:
-		// success
-	case http.StatusConflict:
-		oldHost, err := a.getHost("mysql", host.Alias)
+	if ok {
+		return fmt.Errorf("PMM is already monitoring this MySQL instance %s", name)
+	}
+
+	// Add 3 mysql services to Consul.
+	for job, port := range map[string]uint16{"mysql-hr": 9104, "mysql-mr": 9105, "mysql-lr": 9106} {
+		host := ConsulNode{
+			Node:    name,
+			Address: a.config.ClientAddress,
+			Service: ConsulService{Service: job, Port: port},
+		}
+		hostBytes, _ := json.Marshal(host)
+		url = a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "register")
+		resp, content, err = a.api.Put(url, hostBytes)
 		if err != nil {
 			return err
 		}
-		if oldHost.Address == host.Address {
-			fmt.Printf("prom-config-api is already monitoring MySQL instance %s\n", host.Alias)
-		} else {
-			return ErrHostConflict
+		if resp.StatusCode != http.StatusOK {
+			return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 		}
-	default:
-		return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
 	}
 
 	// Now we have a complete instance resource with ID (UUID), so we can create
@@ -332,15 +359,30 @@ func (a *Admin) AddMySQL(name, dsn, source string, start bool, info map[string]s
 }
 
 func (a *Admin) RemoveMySQL(name string) error {
-	// Remove the host from Prom.
-	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mysql", name)
-	resp, content, err := a.api.Delete(url)
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusNotFound:
-		fmt.Printf("prom-config-api is not monitoring MySQL instance %s\n", name)
-	default:
-		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
+	// Check if Consul is already monitoring this OS.
+	ok, err := a.serviceExists(name, "mysql-hr")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("PMM is not monitoring this MySQL instance")
+	}
+
+	// Remove 3 mysql services from Consul.
+	for _, job := range []string{"mysql-hr", "mysql-mr", "mysql-lr"} {
+		host := ConsulNode{
+			Node:      name,
+			ServiceID: job,
+		}
+		hostBytes, _ := json.Marshal(host)
+		url := a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "deregister")
+		resp, content, err := a.api.Put(url, hostBytes)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
+		}
 	}
 
 	// Stop the 3 local mysqld_exporter processes.
@@ -378,70 +420,93 @@ func (a *Admin) RemoveMySQL(name string) error {
 	return nil
 }
 
-func (a *Admin) AddMongoDB(name string, start bool) error {
+func (a *Admin) AddMongoDB(name string, start bool, uri string, replset string, cluster string) error {
 	// User must first add the OS which sets the client address.
 	if a.config.ClientAddress == "" {
 		return ErrNoOS
 	}
-
 	if !start {
 		return nil
 	}
 
+	// Agent creates an OS instance on install. Use its name for the Prom host alias.
+	instances, err := a.localAgentInstances()
+	os := instances["os"][0]
+
+	// Check if Consul is already monitoring this MongoDB.
+	ok, err := a.serviceExists(os.Name, "mongodb")
+	if err != nil {
+		return err
+	}
+	if ok {
+		return fmt.Errorf("PMM is already monitoring this MongoDB instance %s", os.Name)
+	}
+
+	// Start mongodb_exporter via process manager API.
+	args := []string{fmt.Sprintf("-web.listen-address=%s:9107", a.config.ClientAddress)}
+	if uri != "" {
+		args = append(args, fmt.Sprintf("-mongodb.uri=%s", uri))
+	}
 	exp := proto.Exporter{
 		Name:  "mongodb_exporter",
 		Alias: "MongoDB metrics",
 		Port:  "9107",
-		Args:  []string{"-web.listen-address=" + a.config.ClientAddress + ":9107"},
+		Args:  args,
 	}
 	if err := a.startExporter(exp); err != nil {
 		return err
 	}
 
-	// Add new MongoDB host to Prom and it will start scraping from this client.
-	host := proto.Host{
+	// Add mongodb service to Consul.
+	var tags []string
+	if replset != "" {
+		tags = append(tags, fmt.Sprintf("replset_%s", replset))
+	}
+	if cluster != "" {
+		tags = append(tags, fmt.Sprintf("cluster_%s", cluster))
+	}
+
+	host := ConsulNode{
+		Node:    os.Name,
 		Address: a.config.ClientAddress,
-		Alias:   name,
+		Service: ConsulService{Service: "mongodb", Port: 9107, Tags: tags},
 	}
 	hostBytes, _ := json.Marshal(host)
-	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mongodb")
-	resp, content, err := a.api.Post(url, hostBytes)
+	url := a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "register")
+	resp, content, err := a.api.Put(url, hostBytes)
 	if err != nil {
 		return err
 	}
-	switch resp.StatusCode {
-	case http.StatusCreated:
-		// success
-	case http.StatusConflict:
-		oldHost, err := a.getHost("mongodb", host.Alias)
-		if err != nil {
-			return err
-		}
-		if oldHost.Address == host.Address {
-			fmt.Printf("prom-config-api is already monitoring MongoDB instance %s\n", host.Alias)
-		} else {
-			return ErrHostConflict
-		}
-	default:
-		return a.api.Error("POST", url, resp.StatusCode, http.StatusCreated, content)
+	if resp.StatusCode != http.StatusOK {
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	return nil
 }
 
 func (a *Admin) RemoveMongoDB(name string) error {
-	// Remove the host from Prom.
-	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts", "mongodb", name)
-	resp, content, err := a.api.Delete(url)
+	// Check if Consul is already monitoring this OS.
+	ok, err := a.serviceExists(name, "mongodb")
 	if err != nil {
 		return err
 	}
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusNotFound:
-		fmt.Printf("prom-config-api is not monitoring OS instance %s\n", name)
-	default:
-		return a.api.Error("DELETE", url, resp.StatusCode, http.StatusOK, content)
+	if !ok {
+		return fmt.Errorf("PMM is not monitoring this MongoDB instance")
+	}
+
+	// Remove service from Consul.
+	host := ConsulNode{
+		Node:      name,
+		ServiceID: "mongodb",
+	}
+	hostBytes, _ := json.Marshal(host)
+	url := a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "deregister")
+	resp, content, err := a.api.Put(url, hostBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return a.api.Error("PUT", url, resp.StatusCode, http.StatusOK, content)
 	}
 
 	// Stop mongodb_exporter process.
@@ -453,15 +518,23 @@ func (a *Admin) RemoveMongoDB(name string) error {
 }
 
 func (a *Admin) List() (map[string][]InstanceStatus, error) {
+	// User must first add the OS which sets the client address.
+	if a.config.ClientAddress == "" {
+		return nil, ErrNoOS
+	}
+
+	// Agent creates an OS instance on install. Use its name for the Prom host alias.
+	agent_instances, err := a.localAgentInstances()
+	os := agent_instances["os"][0]
+
 	status := map[string][]InstanceStatus{
 		"os":      []InstanceStatus{},
 		"mysql":   []InstanceStatus{},
 		"mongodb": []InstanceStatus{},
 	}
 
-	// Returns {"mysql":[{"Alias":"beatrice.local","Address":"127.0.0.2"}]}
-	var hosts map[string][]proto.Host
-	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts")
+	// curl http://192.168.56.107:8500/v1/catalog/node/centos7.vm
+	url := a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "node", os.Name)
 	resp, bytes, err := a.api.Get(url)
 	if err != nil {
 		return nil, err
@@ -469,8 +542,28 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
-	if err := json.Unmarshal(bytes, &hosts); err != nil {
+
+	var data interface{}
+	if string(bytes) == "null" {
+		// Node does not exist
+		return nil, nil
+	} else if err = json.Unmarshal(bytes, &data); err != nil {
+		// Node exists
 		return nil, err
+	}
+
+	// Check services
+	for action, job := range map[string]string{"os": "linux", "mysql": "mysql-hr", "mongodb": "mongodb"} {
+		if services, ok := data.(map[string]interface{})["Services"]; ok {
+			if srv, ok := services.(map[string]interface{})[job]; ok {
+				ins := InstanceStatus{
+					Type: job,
+					Name: os.Name,
+					Tags: srv.(map[string]interface{})["Tags"],
+				}
+				status[action] = append(status[action], ins)
+			}
+		}
 	}
 
 	// Get local agent configs which contains any QAN configs it's running.
@@ -485,36 +578,6 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	}
 	if err := json.Unmarshal(bytes, &configs); err != nil {
 		return nil, err
-	}
-
-	// First, let's get the local OS instance because there should only be one.
-	// In Prom, it's the one with the current client address.
-	var osHost *proto.Host
-	for _, host := range hosts["os"] {
-		if host.Address != a.config.ClientAddress {
-			continue
-		}
-		osHost = &host
-		break
-	}
-	if osHost != nil {
-		ins := InstanceStatus{
-			Type:    "os",
-			Name:    osHost.Alias,
-			Metrics: "yes",
-		}
-		status["os"] = append(status["os"], ins)
-	}
-
-	// For now we only support 1 MySQL host per instance, i.e. Prom should only
-	// be scraping 1 MySQL host from this client.
-	var mysqlHost *proto.Host
-	for _, host := range hosts["mysql"] {
-		if host.Address != a.config.ClientAddress {
-			continue
-		}
-		mysqlHost = &host
-		break
 	}
 
 	// Get local agent instance to verify that Prom MySQL host = agent QAN host.
@@ -532,45 +595,46 @@ func (a *Admin) List() (map[string][]InstanceStatus, error) {
 	}
 
 	// If Prom and agent have an OS instance with the same name, set its UUID.
-	if osHost != nil && len(instances["os"]) > 0 && instances["os"][0].Name == osHost.Alias {
-		status["os"][0].UUID = instances["os"][0].UUID
-	}
+	//if len(instances["os"]) > 0 && instances["os"][0].Name == os.Name {
+	//	status["os"][0].UUID = instances["os"][0].UUID
+	//}
 
-	// Check if the loacl agent is running QAN for the same MySQL host;
+	// Check if the local agent is running QAN for the same MySQL host;
 	// it should be.
-	for _, config := range configs {
-		if config.Service != "qan" {
-			continue
-		}
-		for _, in := range instances["mysql"] {
-			if in.UUID != config.UUID {
-				continue
-			}
-			// Now we have the QAN config and instance.
-			ins := InstanceStatus{
-				Type:    "mysql",
-				UUID:    in.UUID,
-				Name:    in.Name,
-				Metrics: "no",
-				Queries: "yes",
-			}
-			if mysqlHost != nil && mysqlHost.Alias == in.Name {
-				ins.Metrics = "yes"
-				mysqlHost = nil
-			}
-			status["mysql"] = append(status["mysql"], ins)
-		}
-	}
-
-	if mysqlHost != nil {
-		ins := InstanceStatus{
-			Type:    "mysql",
-			Name:    osHost.Alias,
-			Metrics: "yes",
-			Queries: "no",
-		}
-		status["mysql"] = append(status["mysql"], ins)
-	}
+	//var mysqlHost interface{}
+	//for _, config := range configs {
+	//	if config.Service != "qan" {
+	//		continue
+	//	}
+	//	for _, in := range instances["mysql"] {
+	//		if in.UUID != config.UUID {
+	//			continue
+	//		}
+	//		// Now we have the QAN config and instance.
+	//		ins := InstanceStatus{
+	//			Type:    "mysql",
+	//			UUID:    in.UUID,
+	//			Name:    in.Name,
+	//			Metrics: "no",
+	//			Queries: "yes",
+	//		}
+	//		if mysqlHost != nil && os.Name == in.Name {
+	//			ins.Metrics = "yes"
+	//			mysqlHost = nil
+	//		}
+	//		status["mysql"] = append(status["mysql"], ins)
+	//	}
+	//}
+	//
+	//if mysqlHost != nil {
+	//	ins := InstanceStatus{
+	//		Type:    "mysql",
+	//		Name:    os.Name,
+	//		Metrics: "yes",
+	//		Queries: "no",
+	//	}
+	//	status["mysql"] = append(status["mysql"], ins)
+	//}
 
 	return status, nil
 }
@@ -624,7 +688,7 @@ func (a *Admin) localAgentInstances() (map[string][]proto.Instance, error) {
 func (a *Admin) startMySQLExporters(uuid string) error {
 	exp := proto.Exporter{
 		Name:         "mysqld_exporter",
-		Alias:        "high res",
+		Alias:        "MySQL high-res metrics",
 		Port:         "9104",
 		InstanceUUID: uuid,
 		Args: []string{
@@ -655,7 +719,7 @@ func (a *Admin) startMySQLExporters(uuid string) error {
 
 	exp = proto.Exporter{
 		Name:         "mysqld_exporter",
-		Alias:        "medium res",
+		Alias:        "MySQL medium-res metrics",
 		Port:         "9105",
 		InstanceUUID: uuid,
 		Args: []string{
@@ -686,7 +750,7 @@ func (a *Admin) startMySQLExporters(uuid string) error {
 
 	exp = proto.Exporter{
 		Name:         "mysqld_exporter",
-		Alias:        "low res",
+		Alias:        "MySQL low-res metrics",
 		Port:         "9106",
 		InstanceUUID: uuid,
 		Args: []string{
@@ -817,23 +881,32 @@ func (a *Admin) stopQAN(agentId string, in proto.Instance) error {
 	return nil
 }
 
-func (a *Admin) getHost(hostType, alias string) (proto.Host, error) {
-	url := a.api.URL(a.config.ServerAddress+":"+proto.DEFAULT_PROM_CONFIG_API_PORT, "hosts")
-	resp, content, err := a.api.Get(url)
+func (a *Admin) serviceExists(host string, job string) (bool, error) {
+	// Check if node service exists on Consul
+	url := a.api.URL(a.config.ServerAddress+":"+CONSUL_PORT, "v1", "catalog", "node", host)
+	resp, bytes, err := a.api.Get(url)
 	if err != nil {
-		return proto.Host{}, err
+		return false, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return proto.Host{}, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, content)
+		return false, a.api.Error("GET", url, resp.StatusCode, http.StatusOK, bytes)
 	}
-	var hosts map[string][]proto.Host
-	if err := json.Unmarshal(content, &hosts); err != nil {
-		return proto.Host{}, err
+
+	var data interface{}
+	if string(bytes) == "null" {
+		// Node does not exist
+		return false, nil
+	} else if err = json.Unmarshal(bytes, &data); err != nil {
+		// Node exists
+		return false, err
 	}
-	for _, host := range hosts[hostType] {
-		if host.Alias == alias {
-			return host, nil
+
+	// Check service
+	if val, ok := data.(map[string]interface{})["Services"]; ok {
+		if _, ok := val.(map[string]interface{})[job]; ok {
+			return true, nil
 		}
 	}
-	return proto.Host{}, ErrNotFound
+	// Node exists but no service
+	return false, nil
 }
